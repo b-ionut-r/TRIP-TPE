@@ -25,7 +25,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -399,6 +399,26 @@ def _augment_trajectory_orderings(
     return augmented
 
 
+def _extract_hpob_records(data_dict: Dict[str, Any]) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+    """Extract one or more HPO-B trajectory payloads from a split entry.
+
+    HPO-B meta_train/meta_test entries are plain {"X", "y"} payloads.
+    bo_initializations uses a different schema: dataset -> seed -> {"X", "y"}.
+    This helper normalizes both cases to a list of (seed_id, payload) tuples.
+    """
+    if not isinstance(data_dict, dict):
+        return []
+
+    if "X" in data_dict and "y" in data_dict:
+        return [(None, data_dict)]
+
+    records: List[Tuple[Optional[str], Dict[str, Any]]] = []
+    for seed_id, seed_payload in data_dict.items():
+        if isinstance(seed_payload, dict) and "X" in seed_payload and "y" in seed_payload:
+            records.append((str(seed_id), seed_payload))
+    return records
+
+
 def generate_hpob_trajectories(
     data_dir: str = "data/hpob",
     gamma: float = 0.15,
@@ -455,6 +475,7 @@ def generate_hpob_trajectories(
 
     all_pairs: List[TrajectoryPair] = []
     training_instance_ids: List[Dict[str, str]] = []  # for manifest
+    seen_manifest_ids = set()
     search_spaces = handler.get_search_spaces()
     n_raw_trajectories = 0
 
@@ -474,52 +495,62 @@ def generate_hpob_trajectories(
                 continue
             for ds_id in split_data[ss_id]:
                 try:
-                    data_dict = split_data[ss_id][ds_id]
-                    X, y = data_dict["X"], data_dict["y"]
-                    configs = np.array(X, dtype=np.float32)
-                    objectives = np.array(y, dtype=np.float32).flatten()
+                    record_list = _extract_hpob_records(split_data[ss_id][ds_id])
+                    if not record_list:
+                        raise KeyError("unsupported HPO-B record schema")
 
-                    if len(configs) < 10:
-                        continue  # Skip tiny datasets
-
-                    configs = _normalize_configs_01(configs)
-
-                    # Extract dataset-level meta-features from OpenML
+                    # Extract dataset-level meta-features from OpenML once per dataset.
                     meta = None
                     if include_meta_features:
                         meta = _get_cached_meta_features(ds_id)
 
-                    # Track this instance for the training manifest
-                    training_instance_ids.append({
-                        "source": "hpob",
-                        "scenario": split_name,
-                        "instance_id": f"{ss_id}/{ds_id}",
-                    })
+                    manifest_key = (split_name, str(ss_id), str(ds_id))
+                    if manifest_key not in seen_manifest_ids:
+                        training_instance_ids.append({
+                            "source": "hpob",
+                            "scenario": split_name,
+                            "instance_id": f"{ss_id}/{ds_id}",
+                        })
+                        seen_manifest_ids.add(manifest_key)
 
-                    # Process the canonical ordering
-                    pairs = preprocessor.process_trajectory(
-                        configs=configs,
-                        objectives=objectives,
-                        search_space_id=f"hpob_{split_name}_{ss_id}_{ds_id}",
-                        minimize=False,
-                        meta_features=meta,
-                    )
-                    all_pairs.extend(pairs)
-                    n_raw_trajectories += 1
+                    for seed_id, data_dict in record_list:
+                        X, y = data_dict["X"], data_dict["y"]
+                        configs = np.array(X, dtype=np.float32)
+                        objectives = np.array(y, dtype=np.float32).flatten()
 
-                    # Augment with random reorderings
-                    augmented = _augment_trajectory_orderings(
-                        configs, objectives, n_augments, rng,
-                    )
-                    for aug_idx, (aug_c, aug_o) in enumerate(augmented):
-                        aug_pairs = preprocessor.process_trajectory(
-                            configs=aug_c,
-                            objectives=aug_o,
-                            search_space_id=f"hpob_{split_name}_{ss_id}_{ds_id}_aug{aug_idx}",
+                        if len(configs) < 10:
+                            continue  # Skip tiny datasets
+
+                        configs = _normalize_configs_01(configs)
+                        seed_suffix = f"_{seed_id}" if seed_id is not None else ""
+
+                        # Process the canonical ordering
+                        pairs = preprocessor.process_trajectory(
+                            configs=configs,
+                            objectives=objectives,
+                            search_space_id=f"hpob_{split_name}_{ss_id}_{ds_id}{seed_suffix}",
                             minimize=False,
                             meta_features=meta,
                         )
-                        all_pairs.extend(aug_pairs)
+                        all_pairs.extend(pairs)
+                        n_raw_trajectories += 1
+
+                        # Augment with random reorderings
+                        augmented = _augment_trajectory_orderings(
+                            configs, objectives, n_augments, rng,
+                        )
+                        for aug_idx, (aug_c, aug_o) in enumerate(augmented):
+                            aug_pairs = preprocessor.process_trajectory(
+                                configs=aug_c,
+                                objectives=aug_o,
+                                search_space_id=(
+                                    f"hpob_{split_name}_{ss_id}_{ds_id}"
+                                    f"{seed_suffix}_aug{aug_idx}"
+                                ),
+                                minimize=False,
+                                meta_features=meta,
+                            )
+                            all_pairs.extend(aug_pairs)
 
                 except Exception as e:
                     print(f"    Skipping {ss_id}/{ds_id}: {e}")
@@ -577,12 +608,24 @@ def generate_yahpo_trajectories(
         recording which instances were used for training.
     """
     try:
-        from yahpo_gym import BenchmarkSet
+        from yahpo_gym import BenchmarkSet, local_config
     except ImportError:
         print(
             "WARNING: yahpo_gym not installed. "
             "Install with: pip install yahpo-gym\n"
             "Skipping YAHPO trajectory generation."
+        )
+        return [], []
+
+    yahpo_data_path = getattr(local_config, "data_path", None)
+    if not yahpo_data_path or not Path(yahpo_data_path).exists():
+        print(
+            "WARNING: YAHPO data path is not configured correctly: "
+            f"{yahpo_data_path!r}\n"
+            "Configure it with:\n"
+            "  python -c \"from yahpo_gym import local_config; "
+            "local_config.init_config(); "
+            "local_config.set_data_path('/path/to/yahpo_data')\""
         )
         return [], []
 

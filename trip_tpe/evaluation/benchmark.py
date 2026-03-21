@@ -491,9 +491,17 @@ def create_yahpo_benchmark(
         BenchmarkSuite, or None if YAHPO is unavailable.
     """
     try:
-        from yahpo_gym import BenchmarkSet
+        from yahpo_gym import BenchmarkSet, local_config
     except ImportError:
         print("WARNING: yahpo_gym not installed. Skipping YAHPO benchmark.")
+        return None
+
+    yahpo_data_path = getattr(local_config, "data_path", None)
+    if not yahpo_data_path or not Path(yahpo_data_path).exists():
+        print(
+            "WARNING: YAHPO data path is not configured correctly: "
+            f"{yahpo_data_path!r}"
+        )
         return None
 
     rng = np.random.RandomState(seed)
