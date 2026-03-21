@@ -706,7 +706,10 @@ def _create_yahpo_instance(
             probe_results = []
             for cfg in pre_config_dicts:
                 try:
-                    probe_results.append(probe.objective_function(cfg))
+                    res = probe.objective_function([cfg])
+                    if isinstance(res, list) and len(res) > 0:
+                        res = res[0]
+                    probe_results.append(res)
                 except Exception:
                     probe_results.append(None)
 
@@ -752,7 +755,12 @@ def _create_yahpo_instance(
 
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
-            result = b.objective_function(cfg)
+            result = b.objective_function([cfg])
+            
+            # Since we passed a list of one config, the result should be a list of one result
+            if isinstance(result, list) and len(result) > 0:
+                result = result[0]
+            
             if result is None:
                 return float("inf") if minimize else float("-inf")
             val = result.get(metric, None)
