@@ -687,14 +687,14 @@ def _create_yahpo_instance(
             for cfg in pre_configs
         ]
 
-        # --- FIX: Inject missing instance identifiers into the probes ---
-        full_hp_names = probe.config_space.get_hyperparameter_names()
-        opt_hp_names = cs.get_hyperparameter_names()
-        missing_keys = set(full_hp_names) - set(opt_hp_names)
+        # --- ADD THIS BLOCK ---
         for cfg in pre_config_dicts:
-            for key in missing_keys:
-                cfg[key] = str(inst_id)
-        # ----------------------------------------------------------------
+            if hasattr(probe, 'config_space') and 'task_id' in probe.config_space:
+                if 'task_id' not in cfg:
+                    cfg['task_id'] = probe.instances[0] if hasattr(probe, 'instances') and len(probe.instances) > 0 else (probe.active_session if hasattr(probe, 'active_session') else str(inst_id))
+            if hasattr(probe, 'config_space') and 'OpenML_task_id' in probe.config_space and 'OpenML_task_id' not in cfg:
+                cfg['OpenML_task_id'] = probe.instances[0] if hasattr(probe, 'instances') and len(probe.instances) > 0 else (probe.active_session if hasattr(probe, 'active_session') else str(inst_id))
+        # ----------------------
 
         # YAHPO supports batched objective queries; fall back to per-config
         # evaluation only if a scenario-specific wrapper rejects the batch.
@@ -746,12 +746,16 @@ def _create_yahpo_instance(
             local_cs = b.get_opt_space()
             cfg = _sample_from_trial(trial, local_cs)
 
-            # --- FIX: Dynamically inject missing instance identifiers ---
-            full_hp_names = b.config_space.get_hyperparameter_names()
-            opt_hp_names = local_cs.get_hyperparameter_names()
-            for key in set(full_hp_names) - set(opt_hp_names):
-                cfg[key] = str(inst)
-            # ------------------------------------------------------------
+            # --- ADD THIS BLOCK ---
+            # YAHPO Gym requires the task_id to be present in the configuration dictionary
+            # for multi-task scenarios when converting it back to a Configuration object.
+            if hasattr(b, 'config_space') and 'task_id' in b.config_space:
+                if 'task_id' not in cfg:
+                    # Inject the active instance ID back into the dictionary
+                    cfg['task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
+            # ----------------------
+            if hasattr(b, 'config_space') and 'OpenML_task_id' in b.config_space and 'OpenML_task_id' not in cfg:
+                cfg['OpenML_task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
 
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
