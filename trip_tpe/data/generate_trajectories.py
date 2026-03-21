@@ -398,7 +398,16 @@ def generate_hpob_trajectories(
         for ds_id in datasets:
             try:
                 # Get pre-evaluated configurations and objectives
-                X, y = handler.get_data(ss_id, ds_id)
+                if hasattr(handler, 'meta_train_data') and ss_id in handler.meta_train_data and ds_id in handler.meta_train_data[ss_id]:
+                    data_dict = handler.meta_train_data[ss_id][ds_id]
+                elif hasattr(handler, 'meta_test_data') and ss_id in handler.meta_test_data and ds_id in handler.meta_test_data[ss_id]:
+                    data_dict = handler.meta_test_data[ss_id][ds_id]
+                elif hasattr(handler, 'bo_initializations') and ss_id in handler.bo_initializations and ds_id in handler.bo_initializations[ss_id]:
+                    data_dict = handler.bo_initializations[ss_id][ds_id]
+                else:
+                    raise ValueError(f"Data missing for {ss_id}/{ds_id}")
+                
+                X, y = data_dict["X"], data_dict["y"]
                 configs = np.array(X, dtype=np.float32)
                 objectives = np.array(y, dtype=np.float32).flatten()
 
