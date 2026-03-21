@@ -45,8 +45,11 @@ Baseline tiers:
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import re
 import time
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -141,7 +144,7 @@ def load_training_manifest(manifest_path: str) -> Set[str]:
         manifest = json.load(f)
 
     ids = set()
-    for entry in manifest.get("instances", []):
+    for entry in manifest.get("instances",[]):
         key = f"{entry.get('source', '')}/{entry.get('scenario', '')}/{entry.get('instance_id', '')}"
         ids.add(key)
     return ids
@@ -167,7 +170,7 @@ def create_synthetic_benchmark(
         BenchmarkSuite with synthetic instances.
     """
     rng = np.random.RandomState(seed)
-    instances = []
+    instances =[]
 
     func_types = ["quadratic", "rosenbrock", "ackley", "rastrigin"]
 
@@ -348,7 +351,7 @@ def create_hpob_benchmark(
     # Prioritize evaluation splits (avoid leakage from meta_train)
     eval_data = None
     eval_split = None
-    for split_name, attr_name in [
+    for split_name, attr_name in[
         ("meta_test", "meta_test_data"),
         ("meta_validation", "meta_validation_data"),
         ("meta_train", "meta_train_data"),
@@ -369,7 +372,7 @@ def create_hpob_benchmark(
 
     print(f"  HPO-B eval split: {eval_split}")
 
-    instances = []
+    instances =[]
     search_spaces = handler.get_search_spaces()
 
     for ss_id in search_spaces:
@@ -491,13 +494,14 @@ def create_yahpo_benchmark(
         BenchmarkSuite, or None if YAHPO is unavailable.
     """
     try:
-        from yahpo_gym import BenchmarkSet, local_config
+        with redirect_stdout(io.StringIO()):
+            from yahpo_gym import BenchmarkSet, local_config
     except ImportError:
         print("WARNING: yahpo_gym not installed. Skipping YAHPO benchmark.")
         return None
 
     if scenarios is None:
-        scenarios = ["lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost"]
+        scenarios =["lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost"]
 
     yahpo_data_path = getattr(local_config, "data_path", None)
     yahpo_root = Path(yahpo_data_path) if yahpo_data_path else None
@@ -519,11 +523,12 @@ def create_yahpo_benchmark(
     if training_manifest:
         train_ids = load_training_manifest(training_manifest)
 
-    instances = []
+    instances =[]
 
     for scenario_name in scenarios:
         try:
-            bench = BenchmarkSet(scenario_name)
+            with redirect_stdout(io.StringIO()):
+                bench = BenchmarkSet(scenario_name)
         except Exception as e:
             print(f"  Skipping YAHPO scenario {scenario_name}: {e}")
             continue
@@ -536,7 +541,7 @@ def create_yahpo_benchmark(
 
         # Select instances, excluding any used in training
         all_inst = list(bench.instances)
-        eligible = []
+        eligible =[]
         for inst_id in all_inst:
             leak_key = f"yahpo/{scenario_name}/{inst_id}"
             if leak_key not in train_ids:
@@ -583,7 +588,7 @@ def create_yahpo_benchmark(
 def _yahpo_target_metric(bench: Any) -> Tuple[Optional[str], bool]:
     """Determine the target metric and optimization direction for a YAHPO scenario."""
     # Ordered by preference: accuracy-like (maximize) then loss-like (minimize)
-    candidates = [
+    candidates =[
         ("val_accuracy", False),
         ("val_balanced_accuracy", False),
         ("acc", False),
@@ -594,7 +599,7 @@ def _yahpo_target_metric(bench: Any) -> Tuple[Optional[str], bool]:
         ("nf", True),
         ("time_train", True),
     ]
-    targets = getattr(bench, 'targets', []) or []
+    targets = getattr(bench, 'targets',[]) or[]
     for metric, is_minimize in candidates:
         if metric in targets:
             return metric, is_minimize
@@ -619,13 +624,13 @@ def _yahpo_target_bounds(bench: Any, target_metric: str) -> Optional[Tuple[float
             except Exception:
                 records = None
     if records is None and hasattr(stats, "iterrows"):
-        records = [row.to_dict() for _, row in stats.iterrows()]
+        records =[row.to_dict() for _, row in stats.iterrows()]
     if records is None and isinstance(stats, list):
         records = stats
     if not records:
         return None
 
-    metric_rows = [
+    metric_rows =[
         row for row in records
         if str(row.get("metric", "")) == target_metric
     ]
@@ -663,12 +668,13 @@ def _create_yahpo_instance(
     available, falling back to local random probing otherwise, then builds
     a fresh BenchmarkSet closure for the actual objective.
     """
-    from yahpo_gym import BenchmarkSet
-
-    # Prefer the official target statistics exposed by YAHPO. Fall back to
-    # local probing only when those statistics are unavailable.
-    probe = BenchmarkSet(scenario_name)
-    probe.set_instance(str(inst_id))
+    with redirect_stdout(io.StringIO()):
+        from yahpo_gym import BenchmarkSet
+        # Prefer the official target statistics exposed by YAHPO. Fall back to
+        # local probing only when those statistics are unavailable.
+        probe = BenchmarkSet(scenario_name)
+        probe.set_instance(str(inst_id))
+        
     cs = probe.get_opt_space()
     target_bounds = _yahpo_target_bounds(probe, target_metric)
     normalization_source = "target_stats"
@@ -682,7 +688,7 @@ def _create_yahpo_instance(
         if not isinstance(pre_configs, list):
             pre_configs = [pre_configs]
 
-        pre_config_dicts = [
+        pre_config_dicts =[
             cfg.get_dictionary() if hasattr(cfg, "get_dictionary") else dict(cfg)
             for cfg in pre_configs
         ]
@@ -703,7 +709,7 @@ def _create_yahpo_instance(
             if not isinstance(probe_results, list):
                 probe_results = [probe_results]
         except Exception:
-            probe_results = []
+            probe_results =[]
             for cfg in pre_config_dicts:
                 try:
                     res = probe.objective_function([cfg])
@@ -713,7 +719,7 @@ def _create_yahpo_instance(
                 except Exception:
                     probe_results.append(None)
 
-        vals = []
+        vals =[]
         for res in probe_results:
             if res is None:
                 continue
@@ -741,8 +747,11 @@ def _create_yahpo_instance(
     # shared state between seeds
     def make_objective(scen, inst, metric, cs_template):
         def objective(trial):
-            b = BenchmarkSet(scen)
-            b.set_instance(str(inst))
+            with redirect_stdout(io.StringIO()):
+                from yahpo_gym import BenchmarkSet
+                b = BenchmarkSet(scen)
+                b.set_instance(str(inst))
+                
             local_cs = b.get_opt_space()
             cfg = _sample_from_trial(trial, local_cs)
 
@@ -756,33 +765,6 @@ def _create_yahpo_instance(
             # ----------------------
             if hasattr(b, 'config_space') and 'OpenML_task_id' in b.config_space and 'OpenML_task_id' not in cfg:
                 cfg['OpenML_task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
-
-            # --- ADD THIS NEW BLOCK ---
-            # 2. Filter out conditionally inactive hyperparameters 
-            if hasattr(b, 'config_space'):
-                import ConfigSpace as CS
-                try:
-                    # Modern ConfigSpace allows instantiating while ignoring inactive values
-                    clean_config = CS.Configuration(b.config_space, values=cfg, allow_inactive_with_values=True)
-                    # Reconstruct the dictionary containing ONLY the active hyperparameters
-                    cfg = dict(clean_config)
-                except TypeError:
-                    # Fallback for older ConfigSpace versions without 'allow_inactive_with_values'
-                    import re
-                    while True:
-                        try:
-                            CS.Configuration(b.config_space, values=cfg)
-                            break # Success, config is clean!
-                        except ValueError as e:
-                            # Match the exact error and drop the offending inactive hyperparameter
-                            match = re.search(r"Inactive hyperparameter '([^']+)' must not be specified", str(e))
-                            if match:
-                                bad_key = match.group(1)
-                                if bad_key in cfg:
-                                    del cfg[bad_key]
-                                    continue
-                            raise e # Reraise if it's a different ValueError
-            # --------------------------
 
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
@@ -858,6 +840,31 @@ def _sample_from_trial(trial: Any, cs: Any) -> Dict[str, Any]:
                     hp.name, int(hp.lower), int(hp.upper),
                     log=getattr(hp, 'log', False),
                 )
+
+    # Clean inactive hyperparameters using ConfigSpace validation
+    if hasattr(cs, "get_conditions") and len(cs.get_conditions()) > 0:
+        try:
+            import ConfigSpace as CS
+            while True:
+                try:
+                    # This will raise ValueError if any inactive parameter is present
+                    CS.Configuration(cs, values=cfg)
+                    break
+                except ValueError as e:
+                    msg = str(e)
+                    # ConfigSpace raises: ValueError: Inactive hyperparameter 'degree' must not be specified...
+                    match = re.search(r"Inactive hyperparameter '([^']+)'", msg)
+                    if match:
+                        hp_name = match.group(1)
+                        if hp_name in cfg:
+                            del cfg[hp_name]
+                        else:
+                            break
+                    else:
+                        break
+        except ImportError:
+            pass
+
     return cfg
 
 
@@ -910,7 +917,7 @@ def run_single_benchmark(
     trajectory = np.array([t.value for t in study.trials if t.value is not None])
 
     regret_at_budgets = {}
-    for budget in [25, 50, 100]:
+    for budget in[25, 50, 100]:
         if budget <= len(trajectory):
             regret_at_budgets[budget] = normalized_regret_at_budget(
                 trajectory, instance.y_min, instance.y_max, budget,
@@ -946,7 +953,7 @@ def run_benchmark_suite(
     use_wandb: bool = False,
 ) -> Dict[str, List[BenchmarkResult]]:
     """Run a full benchmark suite across methods and seeds."""
-    results: Dict[str, List[BenchmarkResult]] = {m: [] for m in methods}
+    results: Dict[str, List[BenchmarkResult]] = {m:[] for m in methods}
 
     total_runs = len(methods) * len(suite.instances) * n_seeds
     print(f"\nBenchmark: {suite.name} ({suite.description})")
@@ -994,11 +1001,11 @@ def _print_summary(suite_name: str, methods: List[str], results: Dict[str, List[
     print(f"SUMMARY: {suite_name}")
     print("=" * 60)
 
-    for budget in [25, 50, 100]:
+    for budget in[25, 50, 100]:
         print(f"\n--- Normalized Regret @ Budget={budget} ---")
         regret_by_method = {}
         for method in methods:
-            regrets = [r.regret_at_budgets.get(budget, float("nan"))
+            regrets =[r.regret_at_budgets.get(budget, float("nan"))
                        for r in results[method] if budget in r.regret_at_budgets]
             if regrets:
                 regret_by_method[method] = regrets
@@ -1054,7 +1061,7 @@ def _save_results(
         }
 
     # Also save per-instance detail
-    detail = []
+    detail =[]
     for method in methods:
         for r in results[method]:
             detail.append({
@@ -1113,10 +1120,10 @@ def _log_wandb_suite_summary(
     for method in methods:
         aurcs = [r.aurc for r in results[method]]
         bests = [r.best_value for r in results[method]]
-        times = [r.wall_time for r in results[method]]
-        r25 = [r.regret_at_budgets.get(25, float("nan")) for r in results[method]]
-        r50 = [r.regret_at_budgets.get(50, float("nan")) for r in results[method]]
-        r100 = [r.regret_at_budgets.get(100, float("nan")) for r in results[method]]
+        times =[r.wall_time for r in results[method]]
+        r25 =[r.regret_at_budgets.get(25, float("nan")) for r in results[method]]
+        r50 =[r.regret_at_budgets.get(50, float("nan")) for r in results[method]]
+        r100 =[r.regret_at_budgets.get(100, float("nan")) for r in results[method]]
         table.add_data(
             suite.name, method,
             float(np.mean(aurcs)), float(np.std(aurcs)),
@@ -1151,9 +1158,9 @@ def _log_wandb_suite_summary(
 
     # --- Regret bar charts per budget ---
     for budget in [25, 50, 100]:
-        bar_data = []
+        bar_data =[]
         for method in methods:
-            regrets = [r.regret_at_budgets.get(budget, float("nan"))
+            regrets =[r.regret_at_budgets.get(budget, float("nan"))
                        for r in results[method] if budget in r.regret_at_budgets]
             if regrets:
                 bar_data.append([method, float(np.nanmean(regrets)), float(np.nanstd(regrets))])
@@ -1167,7 +1174,7 @@ def _log_wandb_suite_summary(
             })
 
     # --- Per-instance detail table ---
-    detail_rows = []
+    detail_rows =[]
     for method in methods:
         for r in results[method]:
             detail_rows.append([
@@ -1287,13 +1294,13 @@ def _print_cross_suite_summary(
     print("CROSS-SUITE AGGREGATION")
     print(f"{'=' * 60}")
 
-    overall = {m: [] for m in methods}
+    overall = {m:[] for m in methods}
     for suite_name, suite_results in all_results.items():
         print(f"\n  Suite: {suite_name}")
         for method in methods:
             if method not in suite_results:
                 continue
-            aurcs = [r.aurc for r in suite_results[method]]
+            aurcs =[r.aurc for r in suite_results[method]]
             overall[method].extend(aurcs)
             print(f"    {method:15s}: AURC = {np.mean(aurcs):.4f} +/- {np.std(aurcs):.4f}")
 
@@ -1308,7 +1315,7 @@ def _log_wandb_cross_suite(
     methods: List[str],
 ):
     """Log cross-suite W&B comparison."""
-    rows = []
+    rows =[]
     for suite_name, suite_results in all_results.items():
         for method in methods:
             if method not in suite_results:
@@ -1323,7 +1330,7 @@ def _log_wandb_cross_suite(
         wandb.log({"benchmark/cross_suite_comparison": table})
 
     # Overall ranking
-    overall = {m: [] for m in methods}
+    overall = {m:[] for m in methods}
     for suite_results in all_results.values():
         for method in methods:
             if method in suite_results:
@@ -1375,7 +1382,7 @@ def main():
                 entity=args.wandb_entity if args.wandb_entity else None,
                 job_type="benchmark",
                 config=vars(args),
-                tags=["benchmark"] + [f"suite-{b}" for b in args.benchmarks],
+                tags=["benchmark"] +[f"suite-{b}" for b in args.benchmarks],
             )
         except Exception as e:
             print(f"W&B init failed ({e}), continuing without logging.")
