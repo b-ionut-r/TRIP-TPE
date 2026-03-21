@@ -419,6 +419,11 @@ def _extract_hpob_records(data_dict: Dict[str, Any]) -> List[Tuple[Optional[str]
     return records
 
 
+def _has_yahpo_scenario_assets(data_root: Path, scenarios: List[str]) -> bool:
+    """Check whether a YAHPO data root contains at least one scenario payload."""
+    return any((data_root / scenario_name / "encoding.json").exists() for scenario_name in scenarios)
+
+
 def generate_hpob_trajectories(
     data_dir: str = "data/hpob",
     gamma: float = 0.15,
@@ -429,9 +434,8 @@ def generate_hpob_trajectories(
 ) -> tuple[List[TrajectoryPair], List[Dict[str, str]]]:
     """Generate training pairs from HPO-B surrogate benchmark.
 
-    Aggressively extracts real trajectories from ALL HPO-B data splits
-    (meta_train, meta_test, bo_initializations) and augments each
-    trajectory with multiple random orderings to maximize the number
+    Extracts real trajectories from the HPO-B meta_train split and augments
+    each trajectory with multiple random orderings to maximize the number
     of real training pairs.
 
     Requires hpob-handler to be installed. Falls back to synthetic
@@ -479,14 +483,12 @@ def generate_hpob_trajectories(
     search_spaces = handler.get_search_spaces()
     n_raw_trajectories = 0
 
-    # IMPORTANT: Only use meta_train (+ bo_initializations) for training.
+    # IMPORTANT: Only use meta_train for training.
     # meta_test and meta_validation are RESERVED for benchmarking to
     # prevent data leakage. This is critical for fair evaluation.
     data_splits = []
     if hasattr(handler, 'meta_train_data') and handler.meta_train_data:
         data_splits.append(("train", handler.meta_train_data))
-    if hasattr(handler, 'bo_initializations') and handler.bo_initializations:
-        data_splits.append(("init", handler.bo_initializations))
 
     for split_name, split_data in data_splits:
         print(f"  Processing HPO-B split: {split_name}")
@@ -617,12 +619,25 @@ def generate_yahpo_trajectories(
         )
         return [], []
 
+    if scenarios is None:
+        # Default: use the most data-rich and diverse YAHPO scenarios
+        scenarios = [
+            "lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost",
+            "rbv2_rpart", "rbv2_glmnet", "rbv2_aknn",
+        ]
+
     yahpo_data_path = getattr(local_config, "data_path", None)
-    if not yahpo_data_path or not Path(yahpo_data_path).exists():
+    yahpo_root = Path(yahpo_data_path) if yahpo_data_path else None
+    if (
+        yahpo_root is None
+        or not yahpo_root.exists()
+        or not _has_yahpo_scenario_assets(yahpo_root, scenarios)
+    ):
         print(
             "WARNING: YAHPO data path is not configured correctly: "
             f"{yahpo_data_path!r}\n"
-            "Configure it with:\n"
+            "Expected a directory containing scenario folders such as "
+            "'lcbench/encoding.json'. Configure it with:\n"
             "  python -c \"from yahpo_gym import local_config; "
             "local_config.init_config(); "
             "local_config.set_data_path('/path/to/yahpo_data')\""
@@ -637,13 +652,6 @@ def generate_yahpo_trajectories(
         n_prefixes_per_trajectory=n_prefixes_per_trajectory,
         seed=seed,
     )
-
-    if scenarios is None:
-        # Default: use the most data-rich and diverse YAHPO scenarios
-        scenarios = [
-            "lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost",
-            "rbv2_rpart", "rbv2_glmnet", "rbv2_aknn",
-        ]
 
     all_pairs: List[TrajectoryPair] = []
     training_instance_ids: List[Dict[str, str]] = []

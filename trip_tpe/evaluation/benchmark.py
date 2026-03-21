@@ -496,8 +496,16 @@ def create_yahpo_benchmark(
         print("WARNING: yahpo_gym not installed. Skipping YAHPO benchmark.")
         return None
 
+    if scenarios is None:
+        scenarios = ["lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost"]
+
     yahpo_data_path = getattr(local_config, "data_path", None)
-    if not yahpo_data_path or not Path(yahpo_data_path).exists():
+    yahpo_root = Path(yahpo_data_path) if yahpo_data_path else None
+    if (
+        yahpo_root is None
+        or not yahpo_root.exists()
+        or not _has_yahpo_scenario_assets(yahpo_root, scenarios)
+    ):
         print(
             "WARNING: YAHPO data path is not configured correctly: "
             f"{yahpo_data_path!r}"
@@ -505,9 +513,6 @@ def create_yahpo_benchmark(
         return None
 
     rng = np.random.RandomState(seed)
-
-    if scenarios is None:
-        scenarios = ["lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost"]
 
     # Load training manifest for leakage prevention
     train_ids = set()
@@ -639,6 +644,11 @@ def _yahpo_target_bounds(bench: Any, target_metric: str) -> Optional[Tuple[float
     if abs(bounds["max"] - bounds["min"]) < 1e-8:
         return None
     return bounds["min"], bounds["max"]
+
+
+def _has_yahpo_scenario_assets(data_root: Path, scenarios: List[str]) -> bool:
+    """Check whether a YAHPO data root contains at least one scenario payload."""
+    return any((data_root / scenario_name / "encoding.json").exists() for scenario_name in scenarios)
 
 
 def _create_yahpo_instance(
