@@ -497,11 +497,12 @@ class Trainer:
                         wandb.run.summary["best_val_loss"] = self.best_val_loss
                         wandb.run.summary["best_epoch"] = epoch
                 else:
-                    self.patience_counter += 1
+                    # Count standard epochs for accurate patience window, not just eval steps
+                    self.patience_counter += self.tc.eval_every
 
                 # Early stopping
                 if self.patience_counter >= self.tc.patience:
-                    print(f"\nEarly stopping at epoch {epoch} (patience={self.tc.patience})")
+                    print(f"\nEarly stopping at epoch {epoch} (patience={self.tc.patience} epochs)")
                     break
 
             # Periodic checkpoint
