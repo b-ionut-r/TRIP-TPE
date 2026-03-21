@@ -158,6 +158,11 @@ def _beta_kl_divergence(
     Returns:
         KL divergence per element, same shape as inputs.
     """
+    # FIX: Force float32. lgamma and digamma are highly unstable in FP16 
+    # and will overflow to Infinity, causing the NaN losses.
+    alpha_q, beta_q = alpha_q.float(), beta_q.float()
+    alpha_p, beta_p = alpha_p.float(), beta_p.float()
+
     # Log Beta function: log B(a,b) = lgamma(a) + lgamma(b) - lgamma(a+b)
     log_beta_q = torch.lgamma(alpha_q) + torch.lgamma(beta_q) - torch.lgamma(alpha_q + beta_q)
     log_beta_p = torch.lgamma(alpha_p) + torch.lgamma(beta_p) - torch.lgamma(alpha_p + beta_p)

@@ -358,6 +358,13 @@ class Trainer:
             # Coverage: fraction of dimensions where pred contains target
             pred_l = predictions["pred_lower"]
             pred_u = predictions["pred_upper"]
+            mix_weights = predictions.get("mix_weights", None)
+
+            # FIX: Collapse mixture components if using Mixture of Betas (K > 1)
+            if mix_weights is not None and pred_l.dim() == 3:
+                pred_l = (pred_l * mix_weights).sum(dim=-1)
+                pred_u = (pred_u * mix_weights).sum(dim=-1)
+
             covers_lower = (pred_l <= target_lower + 0.01).float() * dim_mask
             covers_upper = (pred_u >= target_upper - 0.01).float() * dim_mask
             n_active = dim_mask.sum(dim=1).clamp(min=1.0)
