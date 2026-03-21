@@ -318,8 +318,9 @@ class RegionProposalHead(nn.Module):
             raw_upper = self.upper_head(h).view(B, self.hp_dim, K)
 
         # Softplus ensures α, β > 0 with epsilon for numerical safety.
-        alpha = F.softplus(raw_alpha) + 0.01
-        beta_param = F.softplus(raw_beta) + 0.01
+        # CRITICAL FIX: Cap at 15.0 to prevent lgamma from overflowing FP32
+        alpha = torch.clamp(F.softplus(raw_alpha) + 0.01, max=15.0)
+        beta_param = torch.clamp(F.softplus(raw_beta) + 0.01, max=15.0)
 
         # Direct bound predictions (sigmoid → [0, 1])
         pred_lower = torch.sigmoid(raw_lower)

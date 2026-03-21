@@ -268,15 +268,16 @@ class Trainer:
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}", leave=False)
         for batch in pbar:
-            # Move to device
-            input_seq = batch["input_seq"].to(self.device)
+            # Move to device and sanitize any stray NaNs from datasets
+            input_seq = torch.nan_to_num(batch["input_seq"]).to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
-            target_lower = batch["target_lower"].to(self.device)
-            target_upper = batch["target_upper"].to(self.device)
+            target_lower = torch.nan_to_num(batch["target_lower"]).to(self.device)
+            target_upper = torch.nan_to_num(batch["target_upper"]).to(self.device)
             dim_mask = batch["dim_mask"].to(self.device)
+            
             meta_features = batch.get("meta_features")
             if meta_features is not None:
-                meta_features = meta_features.to(self.device)
+                meta_features = torch.nan_to_num(meta_features, nan=0.5).to(self.device)
 
             # Apply curriculum truncation if active
             if curriculum_max_len is not None:
