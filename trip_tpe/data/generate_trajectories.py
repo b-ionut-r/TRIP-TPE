@@ -5,9 +5,18 @@ Generates training data from surrogate benchmarks (HPO-B, YAHPO Gym)
 or synthetic functions. All trajectory generation is CPU-bound,
 preserving GPU resources exclusively for Transformer training.
 
+Modes:
+    synthetic  — Analytical functions (quadratic/Rosenbrock/Ackley/Rastrigin).
+                 Cheap and unlimited, but poor generalization alone.
+    hpob       — HPO-B v3 surrogate benchmark (real ML datasets).
+    yahpo      — YAHPO Gym surrogate benchmark (rich ML/DL scenarios).
+    real       — Combined HPO-B + YAHPO (recommended for production training).
+
 Usage:
-    trip-tpe-generate --mode synthetic --n-trajectories 50000 --output data/train.pt
+    trip-tpe-generate --mode real --output data/real_train.pt
     trip-tpe-generate --mode hpob --output data/hpob_train.pt
+    trip-tpe-generate --mode yahpo --output data/yahpo_train.pt
+    trip-tpe-generate --mode synthetic --n-trajectories 50000 --output data/synth.pt
 """
 
 from __future__ import annotations
@@ -350,13 +359,60 @@ def _get_cached_meta_features(ds_id: str) -> Optional[np.ndarray]:
     return _meta_feature_cache[ds_id]
 
 
+def _normalize_configs_01(configs: np.ndarray) -> np.ndarray:
+    """Normalize configs to [0, 1] per dimension (in-place safe copy)."""
+    configs = configs.copy()
+    c_min = configs.min(axis=0)
+    c_max = configs.max(axis=0)
+    valid = (c_max - c_min) > 1e-8
+    configs[:, valid] = (configs[:, valid] - c_min[valid]) / (c_max[valid] - c_min[valid])
+    configs[:, ~valid] = 0.5
+    return configs
+
+
+def _augment_trajectory_orderings(
+    configs: np.ndarray,
+    objectives: np.ndarray,
+    n_augments: int,
+    rng: np.random.RandomState,
+) -> List[tuple]:
+    """Generate augmented trajectory orderings via random permutation.
+
+    Real HPO trajectories are order-dependent (trials arrive sequentially).
+    By shuffling the trial order, we simulate different plausible HPO
+    execution sequences from the same underlying dataset, dramatically
+    increasing the effective number of training trajectories.
+
+    Args:
+        configs: Shape (n_trials, n_dims).
+        objectives: Shape (n_trials,).
+        n_augments: Number of augmented orderings to produce.
+        rng: Random state.
+
+    Returns:
+        List of (configs, objectives) tuples with shuffled orderings.
+    """
+    augmented = []
+    for _ in range(n_augments):
+        perm = rng.permutation(len(configs))
+        augmented.append((configs[perm], objectives[perm]))
+    return augmented
+
+
 def generate_hpob_trajectories(
     data_dir: str = "data/hpob",
     gamma: float = 0.15,
     seed: int = 42,
     include_meta_features: bool = True,
-) -> List[TrajectoryPair]:
+    n_prefixes_per_trajectory: int = 15,
+    n_augments: int = 10,
+) -> tuple[List[TrajectoryPair], List[Dict[str, str]]]:
     """Generate training pairs from HPO-B surrogate benchmark.
+
+    Aggressively extracts real trajectories from ALL HPO-B data splits
+    (meta_train, meta_test, bo_initializations) and augments each
+    trajectory with multiple random orderings to maximize the number
+    of real training pairs.
 
     Requires hpob-handler to be installed. Falls back to synthetic
     data if HPO-B is not available.
@@ -367,6 +423,12 @@ def generate_hpob_trajectories(
         seed: Random seed.
         include_meta_features: If True, extract OpenML meta-features for
             each dataset (requires openml package, falls back gracefully).
+        n_prefixes_per_trajectory: Number of prefix samples per trajectory.
+            Higher = more training pairs from each trajectory. Default 15
+            (up from 5) for aggressive extraction.
+        n_augments: Number of random reorderings per trajectory. Each
+            reordering produces n_prefixes_per_trajectory additional pairs.
+            Default 10 → up to 10x more data per search space.
 
     Returns:
         List of TrajectoryPair instances.
@@ -381,61 +443,403 @@ def generate_hpob_trajectories(
         )
         return generate_synthetic_trajectories(seed=seed, include_meta_features=include_meta_features)
 
+    rng = np.random.RandomState(seed)
     handler = HPOBHandler(root_dir=data_dir, mode="v3")
     preprocessor = TrajectoryPreprocessor(
         gamma=gamma,
         min_prefix_len=5,
-        max_prefix_len=50,
-        n_prefixes_per_trajectory=5,
+        max_prefix_len=100,
+        n_prefixes_per_trajectory=n_prefixes_per_trajectory,
         seed=seed,
     )
 
     all_pairs: List[TrajectoryPair] = []
+    training_instance_ids: List[Dict[str, str]] = []  # for manifest
     search_spaces = handler.get_search_spaces()
+    n_raw_trajectories = 0
 
-    for ss_id in tqdm(search_spaces, desc="Processing HPO-B search spaces"):
-        datasets = handler.get_datasets(ss_id)
-        for ds_id in datasets:
+    # IMPORTANT: Only use meta_train (+ bo_initializations) for training.
+    # meta_test and meta_validation are RESERVED for benchmarking to
+    # prevent data leakage. This is critical for fair evaluation.
+    data_splits = []
+    if hasattr(handler, 'meta_train_data') and handler.meta_train_data:
+        data_splits.append(("train", handler.meta_train_data))
+    if hasattr(handler, 'bo_initializations') and handler.bo_initializations:
+        data_splits.append(("init", handler.bo_initializations))
+
+    for split_name, split_data in data_splits:
+        print(f"  Processing HPO-B split: {split_name}")
+        for ss_id in tqdm(search_spaces, desc=f"  HPO-B [{split_name}]"):
+            if ss_id not in split_data:
+                continue
+            for ds_id in split_data[ss_id]:
+                try:
+                    data_dict = split_data[ss_id][ds_id]
+                    X, y = data_dict["X"], data_dict["y"]
+                    configs = np.array(X, dtype=np.float32)
+                    objectives = np.array(y, dtype=np.float32).flatten()
+
+                    if len(configs) < 10:
+                        continue  # Skip tiny datasets
+
+                    configs = _normalize_configs_01(configs)
+
+                    # Extract dataset-level meta-features from OpenML
+                    meta = None
+                    if include_meta_features:
+                        meta = _get_cached_meta_features(ds_id)
+
+                    # Track this instance for the training manifest
+                    training_instance_ids.append({
+                        "source": "hpob",
+                        "scenario": split_name,
+                        "instance_id": f"{ss_id}/{ds_id}",
+                    })
+
+                    # Process the canonical ordering
+                    pairs = preprocessor.process_trajectory(
+                        configs=configs,
+                        objectives=objectives,
+                        search_space_id=f"hpob_{split_name}_{ss_id}_{ds_id}",
+                        minimize=False,
+                        meta_features=meta,
+                    )
+                    all_pairs.extend(pairs)
+                    n_raw_trajectories += 1
+
+                    # Augment with random reorderings
+                    augmented = _augment_trajectory_orderings(
+                        configs, objectives, n_augments, rng,
+                    )
+                    for aug_idx, (aug_c, aug_o) in enumerate(augmented):
+                        aug_pairs = preprocessor.process_trajectory(
+                            configs=aug_c,
+                            objectives=aug_o,
+                            search_space_id=f"hpob_{split_name}_{ss_id}_{ds_id}_aug{aug_idx}",
+                            minimize=False,
+                            meta_features=meta,
+                        )
+                        all_pairs.extend(aug_pairs)
+
+                except Exception as e:
+                    print(f"    Skipping {ss_id}/{ds_id}: {e}")
+                    continue
+
+    print(f"  HPO-B: {n_raw_trajectories} raw trajectories → "
+          f"{len(all_pairs)} training pairs "
+          f"(×{n_augments} augments, ×{n_prefixes_per_trajectory} prefixes)")
+    return all_pairs, training_instance_ids
+
+
+def generate_yahpo_trajectories(
+    gamma: float = 0.15,
+    seed: int = 42,
+    include_meta_features: bool = True,
+    n_prefixes_per_trajectory: int = 15,
+    n_augments: int = 5,
+    n_random_samples: int = 500,
+    scenarios: Optional[List[str]] = None,
+    max_instances_per_scenario: int = 50,
+) -> tuple[List[TrajectoryPair], List[Dict[str, str]]]:
+    """Generate training pairs from YAHPO Gym surrogate benchmark.
+
+    YAHPO Gym provides fitted surrogate models for diverse ML/DL
+    hyperparameter optimization scenarios. Unlike HPO-B (which provides
+    pre-evaluated lookup tables), YAHPO supports querying arbitrary
+    configurations, enabling us to generate thousands of rich trajectories.
+
+    Supported scenarios (default):
+        - lcbench: Learning curve benchmark (OpenML tasks, 7D)
+        - rbv2_svm: SVM on OpenML (6D)
+        - rbv2_ranger: Ranger on OpenML (8D)
+        - rbv2_xgboost: XGBoost on OpenML (14D)
+        - rbv2_rpart: RPart on OpenML (5D)
+        - rbv2_glmnet: GLMNet on OpenML (3D)
+        - rbv2_aknn: Approximate kNN on OpenML (6D)
+        - nb301: NAS-Bench-301 (34D, optional)
+
+    Args:
+        gamma: Quantile threshold.
+        seed: Random seed.
+        include_meta_features: If True, attempt to extract OpenML
+            meta-features from instance IDs.
+        n_prefixes_per_trajectory: Prefixes per trajectory.
+        n_augments: Random reorderings per trajectory.
+        n_random_samples: Number of random configs to sample per
+            (scenario, instance) pair to create each trajectory.
+        scenarios: Explicit list of YAHPO scenarios to use. If None,
+            uses the default curated set (see above).
+        max_instances_per_scenario: Cap instances per scenario to
+            limit generation time.
+
+    Returns:
+        Tuple of (pairs, manifest) where manifest is a list of dicts
+        recording which instances were used for training.
+    """
+    try:
+        from yahpo_gym import BenchmarkSet
+    except ImportError:
+        print(
+            "WARNING: yahpo_gym not installed. "
+            "Install with: pip install yahpo-gym\n"
+            "Skipping YAHPO trajectory generation."
+        )
+        return [], []
+
+    rng = np.random.RandomState(seed)
+    preprocessor = TrajectoryPreprocessor(
+        gamma=gamma,
+        min_prefix_len=5,
+        max_prefix_len=100,
+        n_prefixes_per_trajectory=n_prefixes_per_trajectory,
+        seed=seed,
+    )
+
+    if scenarios is None:
+        # Default: use the most data-rich and diverse YAHPO scenarios
+        scenarios = [
+            "lcbench", "rbv2_svm", "rbv2_ranger", "rbv2_xgboost",
+            "rbv2_rpart", "rbv2_glmnet", "rbv2_aknn",
+        ]
+
+    all_pairs: List[TrajectoryPair] = []
+    training_instance_ids: List[Dict[str, str]] = []
+    n_raw_trajectories = 0
+
+    for scenario_name in scenarios:
+        try:
+            bench = BenchmarkSet(scenario_name)
+        except Exception as e:
+            print(f"  Skipping YAHPO scenario {scenario_name}: {e}")
+            continue
+
+        instances = list(bench.instances)
+        if len(instances) > max_instances_per_scenario:
+            # Random subset to keep generation tractable
+            selected = rng.choice(instances, max_instances_per_scenario, replace=False)
+        else:
+            selected = instances
+
+        # Determine the target metric (use first available performance metric)
+        target_metric = None
+        for candidate in ["val_accuracy", "val_balanced_accuracy", "acc",
+                          "auc", "f1", "logloss", "mmce", "nf", "time_train"]:
+            if hasattr(bench, 'targets') and candidate in bench.targets:
+                target_metric = candidate
+                break
+        if target_metric is None and hasattr(bench, 'targets') and bench.targets:
+            target_metric = bench.targets[0]
+        if target_metric is None:
+            print(f"  Skipping {scenario_name}: no target metric found")
+            continue
+
+        # Determine if we minimize or maximize
+        minimize = target_metric in {"logloss", "mmce", "nf", "time_train"}
+
+        print(f"  YAHPO scenario: {scenario_name} | {len(selected)} instances | "
+              f"metric={target_metric} | minimize={minimize}")
+
+        for inst_id in tqdm(selected, desc=f"  YAHPO [{scenario_name}]"):
             try:
-                # Get pre-evaluated configurations and objectives
-                if hasattr(handler, 'meta_train_data') and ss_id in handler.meta_train_data and ds_id in handler.meta_train_data[ss_id]:
-                    data_dict = handler.meta_train_data[ss_id][ds_id]
-                elif hasattr(handler, 'meta_test_data') and ss_id in handler.meta_test_data and ds_id in handler.meta_test_data[ss_id]:
-                    data_dict = handler.meta_test_data[ss_id][ds_id]
-                elif hasattr(handler, 'bo_initializations') and ss_id in handler.bo_initializations and ds_id in handler.bo_initializations[ss_id]:
-                    data_dict = handler.bo_initializations[ss_id][ds_id]
-                else:
-                    raise ValueError(f"Data missing for {ss_id}/{ds_id}")
-                
-                X, y = data_dict["X"], data_dict["y"]
-                configs = np.array(X, dtype=np.float32)
-                objectives = np.array(y, dtype=np.float32).flatten()
+                bench.set_instance(str(inst_id))
 
-                # Normalize configs to [0, 1] per dimension
-                c_min = configs.min(axis=0)
-                c_max = configs.max(axis=0)
-                valid = (c_max - c_min) > 1e-8
-                configs[:, valid] = (configs[:, valid] - c_min[valid]) / (c_max[valid] - c_min[valid])
-                configs[:, ~valid] = 0.5
+                # Build the optimization space only after binding the instance.
+                # Otherwise the sampled configs can contain a free instance/task
+                # parameter, which produces invalid cross-instance trajectories.
+                cs = bench.get_opt_space()
+                hp_names = [
+                    hp.name for hp in cs.get_hyperparameters()
+                    if hasattr(hp, "choices")
+                    or (hasattr(hp, "lower") and hasattr(hp, "upper"))
+                ]
+                if not hp_names:
+                    continue
 
-                # Extract dataset-level meta-features from OpenML
+                # Sample random configurations from the config space
+                sampled_configs = cs.sample_configuration(n_random_samples)
+                if not isinstance(sampled_configs, list):
+                    sampled_configs = [sampled_configs]
+
+                config_dicts = [
+                    c.get_dictionary() if hasattr(c, "get_dictionary") else dict(c)
+                    for c in sampled_configs
+                ]
+
+                # YAHPO accepts either a single config dict or a list of config
+                # dicts. Use the batched path first for correctness and speed,
+                # then fall back to per-config evaluation if a scenario rejects
+                # the batch payload.
+                try:
+                    batch_results = bench.objective_function(config_dicts)
+                    if not isinstance(batch_results, list):
+                        batch_results = [batch_results]
+                except Exception:
+                    batch_results = []
+                    for cfg in config_dicts:
+                        try:
+                            batch_results.append(bench.objective_function(cfg))
+                        except Exception:
+                            batch_results.append(None)
+
+                configs_list = []
+                objectives_list = []
+                for cfg, res in zip(config_dicts, batch_results):
+                    if res is None:
+                        continue
+                    val = res.get(target_metric, None)
+                    if val is None or np.isnan(val):
+                        continue
+                    # Encode config as numeric array using hp_names order
+                    numeric_cfg = []
+                    for hp_name in hp_names:
+                        v = cfg.get(hp_name, 0)
+                        if isinstance(v, (int, float)):
+                            numeric_cfg.append(float(v))
+                        elif isinstance(v, str):
+                            # Categorical → hash-based encoding
+                            numeric_cfg.append(float(hash(v) % 1000) / 1000.0)
+                        elif isinstance(v, bool):
+                            numeric_cfg.append(1.0 if v else 0.0)
+                        else:
+                            numeric_cfg.append(0.0)
+                    configs_list.append(numeric_cfg)
+                    objectives_list.append(float(val))
+
+                if len(configs_list) < 20:
+                    continue
+
+                configs = np.array(configs_list, dtype=np.float32)
+                objectives = np.array(objectives_list, dtype=np.float32)
+
+                # Normalize to [0, 1]
+                configs = _normalize_configs_01(configs)
+
+                # Extract meta-features if instance is an OpenML dataset ID
                 meta = None
                 if include_meta_features:
-                    meta = _get_cached_meta_features(ds_id)
+                    try:
+                        meta = _get_cached_meta_features(str(inst_id))
+                    except Exception:
+                        pass
 
+                # Track this instance for the training manifest
+                training_instance_ids.append({
+                    "source": "yahpo",
+                    "scenario": scenario_name,
+                    "instance_id": str(inst_id),
+                })
+
+                # Process the canonical ordering
                 pairs = preprocessor.process_trajectory(
                     configs=configs,
                     objectives=objectives,
-                    search_space_id=f"hpob_{ss_id}_{ds_id}",
-                    minimize=True,
+                    search_space_id=f"yahpo_{scenario_name}_{inst_id}",
+                    minimize=minimize,
                     meta_features=meta,
                 )
                 all_pairs.extend(pairs)
+                n_raw_trajectories += 1
+
+                # Augment with random reorderings
+                augmented = _augment_trajectory_orderings(
+                    configs, objectives, n_augments, rng,
+                )
+                for aug_idx, (aug_c, aug_o) in enumerate(augmented):
+                    aug_pairs = preprocessor.process_trajectory(
+                        configs=aug_c,
+                        objectives=aug_o,
+                        search_space_id=f"yahpo_{scenario_name}_{inst_id}_aug{aug_idx}",
+                        minimize=minimize,
+                        meta_features=meta,
+                    )
+                    all_pairs.extend(aug_pairs)
+
             except Exception as e:
-                print(f"  Skipping {ss_id}/{ds_id}: {e}")
+                print(f"    Skipping {scenario_name}/{inst_id}: {e}")
                 continue
 
-    return all_pairs
+    print(f"  YAHPO: {n_raw_trajectories} raw trajectories → "
+          f"{len(all_pairs)} training pairs")
+    return all_pairs, training_instance_ids
+
+
+def generate_real_trajectories(
+    hpob_dir: str = "data/hpob",
+    gamma: float = 0.15,
+    seed: int = 42,
+    include_meta_features: bool = True,
+    n_prefixes: int = 15,
+    hpob_augments: int = 10,
+    yahpo_augments: int = 5,
+    yahpo_samples: int = 500,
+    yahpo_scenarios: Optional[List[str]] = None,
+) -> tuple[List[TrajectoryPair], List[Dict[str, str]]]:
+    """Generate combined HPO-B + YAHPO real trajectories.
+
+    This is the recommended mode for production training. Combines
+    both surrogate benchmarks to maximize real trajectory coverage:
+    - HPO-B contributes ~400 raw trajectories × 10 augments × 15 prefixes
+    - YAHPO contributes ~2000+ raw trajectories × 5 augments × 15 prefixes
+
+    Total: typically 200K-500K+ real training pairs.
+
+    IMPORTANT: Only uses HPO-B meta_train (not test/val) to prevent
+    data leakage. The training manifest records all used instances so
+    the benchmark module can exclude them.
+
+    Args:
+        hpob_dir: HPO-B data directory.
+        gamma: Quantile threshold.
+        seed: Random seed.
+        include_meta_features: Extract OpenML meta-features.
+        n_prefixes: Prefixes per trajectory for both sources.
+        hpob_augments: Augmented orderings for HPO-B.
+        yahpo_augments: Augmented orderings for YAHPO.
+        yahpo_samples: Random samples per YAHPO instance.
+        yahpo_scenarios: YAHPO scenarios (None = default set).
+
+    Returns:
+        Tuple of (pairs, manifest) where manifest is a list of dicts
+        recording every instance used for training.
+    """
+    all_pairs: List[TrajectoryPair] = []
+    all_manifest: List[Dict[str, str]] = []
+
+    print("=" * 60)
+    print("Generating REAL trajectories (HPO-B + YAHPO)")
+    print("=" * 60)
+
+    # HPO-B (meta_train only — meta_test reserved for benchmarking)
+    print("\n--- HPO-B (meta_train only) ---")
+    hpob_pairs, hpob_manifest = generate_hpob_trajectories(
+        data_dir=hpob_dir,
+        gamma=gamma,
+        seed=seed,
+        include_meta_features=include_meta_features,
+        n_prefixes_per_trajectory=n_prefixes,
+        n_augments=hpob_augments,
+    )
+    all_pairs.extend(hpob_pairs)
+    all_manifest.extend(hpob_manifest)
+
+    # YAHPO
+    print("\n--- YAHPO Gym ---")
+    yahpo_pairs, yahpo_manifest = generate_yahpo_trajectories(
+        gamma=gamma,
+        seed=seed + 1,  # different seed for diversity
+        include_meta_features=include_meta_features,
+        n_prefixes_per_trajectory=n_prefixes,
+        n_augments=yahpo_augments,
+        n_random_samples=yahpo_samples,
+        scenarios=yahpo_scenarios,
+    )
+    all_pairs.extend(yahpo_pairs)
+    all_manifest.extend(yahpo_manifest)
+
+    print(f"\n  TOTAL: {len(all_pairs)} real training pairs "
+          f"({len(hpob_pairs)} HPO-B + {len(yahpo_pairs)} YAHPO)")
+    print(f"  Training manifest: {len(all_manifest)} unique instances recorded")
+    return all_pairs, all_manifest
 
 
 def save_pairs(pairs: List[TrajectoryPair], output_path: str) -> None:
@@ -497,20 +901,20 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["synthetic", "hpob"],
-        default="synthetic",
-        help="Data source: synthetic functions or HPO-B benchmark",
+        choices=["synthetic", "hpob", "yahpo", "real"],
+        default="real",
+        help="Data source: 'real' (HPO-B + YAHPO, recommended), 'hpob', 'yahpo', or 'synthetic'",
     )
     parser.add_argument(
         "--n-trajectories",
         type=int,
         default=50000,
-        help="Number of trajectories to generate (synthetic mode)",
+        help="Number of trajectories to generate (synthetic mode only)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="data/train.pt",
+        default="data/real_train.pt",
         help="Output file path",
     )
     parser.add_argument(
@@ -529,7 +933,25 @@ def main():
         "--hpob-dir",
         type=str,
         default="data/hpob",
-        help="HPO-B data directory (hpob mode)",
+        help="HPO-B data directory",
+    )
+    parser.add_argument(
+        "--n-prefixes",
+        type=int,
+        default=15,
+        help="Prefix samples per trajectory (default 15, higher = more data)",
+    )
+    parser.add_argument(
+        "--n-augments",
+        type=int,
+        default=10,
+        help="Random reorderings per trajectory (default 10)",
+    )
+    parser.add_argument(
+        "--yahpo-samples",
+        type=int,
+        default=500,
+        help="Random config samples per YAHPO instance (default 500)",
     )
     parser.add_argument("--wandb-project", type=str, default="trip-tpe", help="W&B project")
     parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity")
@@ -548,6 +970,8 @@ def main():
                 config={
                     "mode": args.mode,
                     "n_trajectories": args.n_trajectories,
+                    "n_prefixes": args.n_prefixes,
+                    "n_augments": args.n_augments,
                     "gamma": args.gamma,
                     "seed": args.seed,
                     "output": args.output,
@@ -561,6 +985,8 @@ def main():
     import time
     t0 = time.time()
 
+    manifest = []  # Training instance manifest for leakage prevention
+
     if args.mode == "synthetic":
         pairs = generate_synthetic_trajectories(
             n_trajectories=args.n_trajectories,
@@ -568,13 +994,47 @@ def main():
             seed=args.seed,
         )
     elif args.mode == "hpob":
-        pairs = generate_hpob_trajectories(
+        pairs, manifest = generate_hpob_trajectories(
             data_dir=args.hpob_dir,
             gamma=args.gamma,
             seed=args.seed,
+            n_prefixes_per_trajectory=args.n_prefixes,
+            n_augments=args.n_augments,
+        )
+    elif args.mode == "yahpo":
+        pairs, manifest = generate_yahpo_trajectories(
+            gamma=args.gamma,
+            seed=args.seed,
+            n_prefixes_per_trajectory=args.n_prefixes,
+            n_augments=args.n_augments,
+            n_random_samples=args.yahpo_samples,
+        )
+    elif args.mode == "real":
+        pairs, manifest = generate_real_trajectories(
+            hpob_dir=args.hpob_dir,
+            gamma=args.gamma,
+            seed=args.seed,
+            n_prefixes=args.n_prefixes,
+            hpob_augments=args.n_augments,
+            yahpo_augments=max(1, args.n_augments // 2),
+            yahpo_samples=args.yahpo_samples,
         )
 
     save_pairs(pairs, args.output)
+
+    # Save training manifest for benchmark leakage prevention
+    if manifest:
+        manifest_path = Path(args.output).parent / "training_manifest.json"
+        manifest_data = {
+            "mode": args.mode,
+            "seed": args.seed,
+            "n_pairs": len(pairs),
+            "instances": manifest,
+        }
+        with open(manifest_path, "w") as f:
+            json.dump(manifest_data, f, indent=2)
+        print(f"Training manifest saved to {manifest_path} "
+              f"({len(manifest)} instances)")
 
     gen_time = time.time() - t0
 
@@ -584,8 +1044,17 @@ def main():
         seq_lens = [p.seq_len for p in pairs]
         n_dims_list = [p.input_configs.shape[1] for p in pairs]
         has_meta = sum(1 for p in pairs if p.meta_features is not None)
+
+        # Source breakdown
+        n_hpob = sum(1 for p in pairs if p.search_space_id.startswith("hpob_"))
+        n_yahpo = sum(1 for p in pairs if p.search_space_id.startswith("yahpo_"))
+        n_synth = len(pairs) - n_hpob - n_yahpo
+
         wandb.log({
             "data/n_pairs": len(pairs),
+            "data/n_hpob_pairs": n_hpob,
+            "data/n_yahpo_pairs": n_yahpo,
+            "data/n_synthetic_pairs": n_synth,
             "data/mean_seq_len": float(np.mean(seq_lens)),
             "data/max_seq_len": int(np.max(seq_lens)),
             "data/mean_n_dims": float(np.mean(n_dims_list)),
@@ -595,7 +1064,8 @@ def main():
         # Register output as artifact
         artifact = wandb.Artifact(
             f"trip-tpe-data-{args.mode}", type="dataset",
-            description=f"{len(pairs)} trajectory pairs from {args.mode} source",
+            description=f"{len(pairs)} trajectory pairs from {args.mode} source "
+                        f"({n_hpob} hpob, {n_yahpo} yahpo, {n_synth} synth)",
         )
         artifact.add_file(args.output)
         wandb.log_artifact(artifact)

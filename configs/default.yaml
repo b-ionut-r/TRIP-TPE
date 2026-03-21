@@ -74,6 +74,7 @@ evaluation:
   benchmarks:
     - hpob
     - yahpo
+    - synthetic
   baselines:
     - random
     - tpe
@@ -84,6 +85,16 @@ evaluation:
     - pfns4bo
   metric: normalized_regret
   output_dir: results
+
+data_generation:
+  # Default mode: 'real' combines HPO-B + YAHPO for maximum coverage
+  mode: real
+  n_prefixes_per_trajectory: 15
+  hpob_augments: 10
+  yahpo_augments: 5
+  yahpo_samples_per_instance: 500
+  # Training data mixing: real is primary, synthetic is minor augmentation
+  mix_synthetic: 0.1
 
 device: auto
 checkpoint_dir: checkpoints

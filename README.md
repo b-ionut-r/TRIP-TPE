@@ -54,26 +54,37 @@ pip install -e .
 
 ## Full Training Pipeline
 
+### 0. Prepare benchmark data
+
+```bash
+# HPO-B: the Python handler does not download the dataset for you.
+# Download hpob-data.zip and unpack it under data/hpob/.
+# Official source: https://github.com/machinelearningnuremberg/HPO-B
+
+# YAHPO Gym: download the surrogate bundle and point yahpo_gym at it.
+# Official setup docs: https://slds-lmu.github.io/yahpo_gym/getting_started.html
+```
+
 ### 1. Generate training data
 
 ```bash
 # Synthetic (for local testing)
 trip-tpe-generate --mode synthetic --n-trajectories 50000 --output data/train.pt
 
-# HPO-B surrogate (for production)
-trip-tpe-generate --mode hpob --output data/hpob_train.pt
+# Real surrogate mix (recommended for production)
+trip-tpe-generate --mode real --output data/real_train.pt
 ```
 
 ### 2. Train the Transformer
 
 ```bash
-trip-tpe-train --data-path data/hpob_train.pt --mix-synthetic 0.3 --epochs 100
+trip-tpe-train --data-path data/real_train.pt --mix-synthetic 0.1 --epochs 100
 ```
 
 ### 3. Benchmark
 
 ```bash
-trip-tpe-eval --model-path checkpoints/best_model.pt --methods trip_tpe tpe random --n-seeds 20
+trip-tpe-eval --model-path checkpoints/best_model.pt --benchmarks yahpo hpob synthetic --training-manifest data/training_manifest.json --n-seeds 20
 ```
 
 All three stages support `--wandb-project` and `--wandb-entity` flags for live W&B logging.

@@ -53,10 +53,6 @@ class Trainer:
         """
         self.config = config
         self.tc = config.training
-        
-        # ADD THIS LINE TO DISABLE FP16 OVERFLOWS
-        self.tc.fp16 = False 
-        
         self.mc = config.transformer
 
         # Resolve device
@@ -66,6 +62,11 @@ class Trainer:
             self.device = torch.device(config.device)
 
         print(f"Using device: {self.device}")
+
+        # AMP is only enabled on CUDA. Numerically sensitive ops such as the
+        # Beta KL path are still forced to float32 inside the loss.
+        self.use_amp = bool(self.tc.fp16 and self.device.type == "cuda")
+        print(f"Mixed precision: {'FP16 AMP' if self.use_amp else 'disabled'}")
 
         # Validate config consistency
         self._validate_config()
@@ -113,7 +114,7 @@ class Trainer:
         )
 
         # Mixed precision scaler
-        self.scaler = torch.amp.GradScaler("cuda", enabled=(self.tc.fp16 and self.device.type == "cuda"))
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # Scheduler (cosine annealing with warmup)
         self.scheduler = None  # Set after dataloader is created
@@ -286,7 +287,7 @@ class Trainer:
                 )
 
             # Forward pass with mixed precision
-            with torch.amp.autocast(self.device.type, enabled=self.tc.fp16):
+            with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
                 predictions = self.model(input_seq, attention_mask, meta_features=meta_features)
                 losses = self.criterion(predictions, target_lower, target_upper, dim_mask)
 
@@ -342,16 +343,16 @@ class Trainer:
         total_tightness = 0.0
 
         for batch in dataloader:
-            input_seq = batch["input_seq"].to(self.device)
+            input_seq = torch.nan_to_num(batch["input_seq"]).to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
-            target_lower = batch["target_lower"].to(self.device)
-            target_upper = batch["target_upper"].to(self.device)
+            target_lower = torch.nan_to_num(batch["target_lower"]).to(self.device)
+            target_upper = torch.nan_to_num(batch["target_upper"]).to(self.device)
             dim_mask = batch["dim_mask"].to(self.device)
             meta_features = batch.get("meta_features")
             if meta_features is not None:
-                meta_features = meta_features.to(self.device)
+                meta_features = torch.nan_to_num(meta_features, nan=0.5).to(self.device)
 
-            with torch.amp.autocast(self.device.type, enabled=self.tc.fp16):
+            with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
                 predictions = self.model(input_seq, attention_mask, meta_features=meta_features)
                 losses = self.criterion(predictions, target_lower, target_upper, dim_mask)
 
@@ -541,9 +542,10 @@ def main():
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data only")
     parser.add_argument("--data-path", type=str, default=None, help="Path to .pt training data")
     parser.add_argument(
-        "--mix-synthetic", type=float, default=0.3, metavar="FRAC",
+        "--mix-synthetic", type=float, default=0.1, metavar="FRAC",
         help="When using --data-path, mix this fraction of synthetic data "
-             "for curriculum diversity (default: 0.3, 0 to disable)",
+             "for curriculum diversity (default: 0.1, 0 to disable). "
+             "Real data should be the primary source; synthetic only augments.",
     )
     parser.add_argument("--n-trajectories", type=int, default=10000, help="Synthetic trajectories")
     parser.add_argument("--epochs", type=int, default=None, help="Override num_epochs")
@@ -630,10 +632,11 @@ def main():
             "produces a weak model that does not generalize to real HPO landscapes.\n"
             "This would waste cloud GPU hours.\n"
             "\n"
-            "For a production cloud training run, generate surrogate data first:\n"
-            "  trip-tpe-generate --mode hpob --output data/hpob_train.pt\n"
+            "For a production cloud training run, generate real data first:\n"
+            "  trip-tpe-generate --mode real --output data/real_train.pt\n"
+            "  (combines HPO-B + YAHPO Gym with aggressive augmentation)\n"
             "Then re-run with:\n"
-            "  trip-tpe-train --data-path data/hpob_train.pt --mix-synthetic 0.3\n"
+            "  trip-tpe-train --data-path data/real_train.pt --mix-synthetic 0.1\n"
             "\n"
             "To intentionally train on synthetic data only (e.g. for local testing),\n"
             "pass the --synthetic flag explicitly.\n"
