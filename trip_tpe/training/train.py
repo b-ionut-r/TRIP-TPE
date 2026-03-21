@@ -543,8 +543,9 @@ def main():
     parser.add_argument("--data-path", type=str, default=None, help="Path to .pt training data")
     parser.add_argument(
         "--mix-synthetic", type=float, default=0.1, metavar="FRAC",
-        help="When using --data-path, mix this fraction of synthetic data "
-             "for curriculum diversity (default: 0.1, 0 to disable). "
+        help="When using --data-path, target this fraction of synthetic "
+             "training items in the final mixed dataset for curriculum "
+             "diversity (default: 0.1, 0 to disable). "
              "Real data should be the primary source; synthetic only augments.",
     )
     parser.add_argument("--n-trajectories", type=int, default=10000, help="Synthetic trajectories")
