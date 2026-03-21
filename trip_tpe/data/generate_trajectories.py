@@ -381,7 +381,7 @@ def generate_hpob_trajectories(
         )
         return generate_synthetic_trajectories(seed=seed, include_meta_features=include_meta_features)
 
-    handler = HPOBHandler(root_dir=data_dir, mode="v3-test")
+    handler = HPOBHandler(root_dir=data_dir, mode="v3")
     preprocessor = TrajectoryPreprocessor(
         gamma=gamma,
         min_prefix_len=5,
@@ -534,7 +534,7 @@ def main():
         try:
             wandb.init(
                 project=args.wandb_project,
-                entity=args.wandb_entity,
+                entity=args.wandb_entity if args.wandb_entity else None,
                 job_type="data-generation",
                 config={
                     "mode": args.mode,

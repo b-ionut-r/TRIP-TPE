@@ -123,14 +123,17 @@ class Trainer:
         self.use_wandb = WANDB_AVAILABLE and not getattr(config, '_disable_wandb', False)
         if self.use_wandb:
             try:
-                wandb.init(
-                    project=getattr(config, 'wandb_project', 'trip-tpe'),
-                    entity=getattr(config, 'wandb_entity', None),
-                    name=getattr(config, 'wandb_run_name', None),
-                    config=_dataclass_to_dict(config),
-                    tags=["training", f"layers-{self.mc.num_layers}", f"embed-{self.mc.embed_dim}"],
-                    save_code=True,
-                )
+                wandb_kwargs = {
+                    "project": getattr(config, 'wandb_project', 'trip-tpe'),
+                    "name": getattr(config, 'wandb_run_name', None),
+                    "config": _dataclass_to_dict(config),
+                    "tags": ["training", f"layers-{self.mc.num_layers}", f"embed-{self.mc.embed_dim}"],
+                    "save_code": True,
+                }
+                if getattr(config, 'wandb_entity', None):
+                    wandb_kwargs["entity"] = config.wandb_entity
+                
+                wandb.init(**wandb_kwargs)
                 wandb.watch(self.model, log="gradients", log_freq=100)
                 print("W&B logging enabled.")
             except Exception as e:

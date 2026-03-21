@@ -430,7 +430,7 @@ def main():
         try:
             wandb.init(
                 project=args.wandb_project,
-                entity=args.wandb_entity,
+                entity=args.wandb_entity if args.wandb_entity else None,
                 job_type="benchmark",
                 config={
                     "methods": args.methods,
