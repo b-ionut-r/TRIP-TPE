@@ -45,8 +45,10 @@ dependencies = [
 
 [project.optional-dependencies]
 benchmarks = [
-    "hpob-handler>=0.1.0",
     "yahpo-gym>=1.0.0",
+    # hpob-handler is not on PyPI — install manually:
+    #   git clone https://github.com/releaunifreiburg/HPO-B.git
+    #   export PYTHONPATH="/path/to/HPO-B:$PYTHONPATH"
 ]
 dev = [
     "pytest>=7.0",
