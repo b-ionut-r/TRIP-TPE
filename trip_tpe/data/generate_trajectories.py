@@ -507,14 +507,7 @@ def generate_hpob_trajectories(
                         meta = _get_cached_meta_features(ds_id)
 
                     manifest_key = (split_name, str(ss_id), str(ds_id))
-                    if manifest_key not in seen_manifest_ids:
-                        training_instance_ids.append({
-                            "source": "hpob",
-                            "scenario": split_name,
-                            "instance_id": f"{ss_id}/{ds_id}",
-                        })
-                        seen_manifest_ids.add(manifest_key)
-
+                    instance_recorded = manifest_key in seen_manifest_ids
                     for seed_id, data_dict in record_list:
                         X, y = data_dict["X"], data_dict["y"]
                         configs = np.array(X, dtype=np.float32)
@@ -525,6 +518,15 @@ def generate_hpob_trajectories(
 
                         configs = _normalize_configs_01(configs)
                         seed_suffix = f"_{seed_id}" if seed_id is not None else ""
+
+                        if not instance_recorded:
+                            training_instance_ids.append({
+                                "source": "hpob",
+                                "scenario": split_name,
+                                "instance_id": f"{ss_id}/{ds_id}",
+                            })
+                            seen_manifest_ids.add(manifest_key)
+                            instance_recorded = True
 
                         # Process the canonical ordering
                         pairs = preprocessor.process_trajectory(
@@ -773,13 +775,6 @@ def generate_yahpo_trajectories(
                     except Exception:
                         pass
 
-                # Track this instance for the training manifest
-                training_instance_ids.append({
-                    "source": "yahpo",
-                    "scenario": scenario_name,
-                    "instance_id": str(inst_id),
-                })
-
                 # Process the canonical ordering
                 pairs = preprocessor.process_trajectory(
                     configs=configs,
@@ -788,6 +783,11 @@ def generate_yahpo_trajectories(
                     minimize=minimize,
                     meta_features=meta,
                 )
+                training_instance_ids.append({
+                    "source": "yahpo",
+                    "scenario": scenario_name,
+                    "instance_id": str(inst_id),
+                })
                 all_pairs.extend(pairs)
                 n_raw_trajectories += 1
 

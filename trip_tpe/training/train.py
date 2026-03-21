@@ -26,7 +26,7 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import ConcatDataset, DataLoader, Subset, random_split
 from tqdm import tqdm
 
 from trip_tpe.data.preprocessing import TrajectoryPreprocessor
@@ -598,18 +598,32 @@ def main():
 
         # Optionally mix in synthetic data for curriculum diversity
         if args.mix_synthetic > 0:
-            n_synthetic = max(1, int(len(primary_dataset) * args.mix_synthetic / (1.0 - args.mix_synthetic)))
+            target_synth_items = max(
+                1,
+                int(len(primary_dataset) * args.mix_synthetic / (1.0 - args.mix_synthetic)),
+            )
             synthetic_dataset = SyntheticTrajectoryDataset(
-                n_trajectories=min(n_synthetic, args.n_trajectories),
+                n_trajectories=args.n_trajectories,
                 hp_dim=config.transformer.hp_input_dim,
                 max_seq_len=config.transformer.max_seq_len,
             )
-            from torch.utils.data import ConcatDataset
+
+            if len(synthetic_dataset) >= target_synth_items:
+                synth_indices = torch.randperm(len(synthetic_dataset))[:target_synth_items].tolist()
+                synthetic_dataset = Subset(synthetic_dataset, synth_indices)
+            else:
+                print(
+                    f"Warning: requested {target_synth_items} synthetic items for "
+                    f"mix_synthetic={args.mix_synthetic:.0%}, but only generated "
+                    f"{len(synthetic_dataset)} from {args.n_trajectories} trajectories."
+                )
+
             dataset = ConcatDataset([primary_dataset, synthetic_dataset])
+            actual_synth_frac = len(synthetic_dataset) / max(len(dataset), 1)
             print(
                 f"Mixed dataset: {len(primary_dataset)} surrogate + "
                 f"{len(synthetic_dataset)} synthetic = {len(dataset)} total "
-                f"({args.mix_synthetic:.0%} synthetic)"
+                f"({actual_synth_frac:.1%} synthetic, target={args.mix_synthetic:.0%})"
             )
         else:
             dataset = primary_dataset

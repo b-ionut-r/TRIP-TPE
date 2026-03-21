@@ -124,6 +124,14 @@ If you use TRIP-TPE in your research, please cite:
 }
 ```
 
+If you use the real-data pipeline based on YAHPO / rbv2 benchmark assets, also cite:
+
+```text
+Binder M., Pfisterer F. & Bischl B. (2020). Collecting Empirical Data About
+Hyperparameters for Data Driven AutoML. 7th ICML Workshop on Automated Machine
+Learning.
+```
+
 ## License
 
 MIT
