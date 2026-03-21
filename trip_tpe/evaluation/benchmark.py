@@ -845,12 +845,15 @@ def _sample_from_trial(trial: Any, cs: Any) -> Dict[str, Any]:
     if hasattr(cs, "get_conditions") and len(cs.get_conditions()) > 0:
         try:
             import ConfigSpace as CS
+            import re
             while True:
                 try:
-                    # This will raise ValueError if any inactive parameter is present
-                    CS.Configuration(cs, values=cfg)
+                    # CS.Configuration initialization will strip out inactive parameters
+                    # if they aren't strictly validated, or it will throw an exception
+                    clean_config = CS.Configuration(cs, values=cfg)
+                    cfg = clean_config.get_dictionary()
                     break
-                except ValueError as e:
+                except Exception as e:
                     msg = str(e)
                     # ConfigSpace raises: ValueError: Inactive hyperparameter 'degree' must not be specified...
                     match = re.search(r"Inactive hyperparameter '([^']+)'", msg)
@@ -861,7 +864,7 @@ def _sample_from_trial(trial: Any, cs: Any) -> Dict[str, Any]:
                         else:
                             break
                     else:
-                        break
+                        raise e
         except ImportError:
             pass
 
