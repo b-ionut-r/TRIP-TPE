@@ -53,6 +53,10 @@ class Trainer:
         """
         self.config = config
         self.tc = config.training
+        
+        # ADD THIS LINE TO DISABLE FP16 OVERFLOWS
+        self.tc.fp16 = False 
+        
         self.mc = config.transformer
 
         # Resolve device
