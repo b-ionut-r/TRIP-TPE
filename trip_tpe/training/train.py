@@ -659,16 +659,44 @@ def main():
         )
         sys.exit(1)
 
-    # Train/val split
-    n_total = len(dataset)
-    n_val = max(1, int(0.1 * n_total))
-    n_train = n_total - n_val
-    train_ds, val_ds = random_split(
-        dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(42),
-    )
+    # Build group IDs for group splitting to prevent train/val leakage
+    all_group_ids = []
+    
+    if args.data_path:
+        all_group_ids.extend([pair.search_space_id.split("_aug")[0] for pair in primary_dataset.pairs])
+        
+        if args.mix_synthetic > 0:
+            if isinstance(synthetic_dataset, Subset):
+                all_group_ids.extend([synthetic_dataset.dataset.group_ids[i] for i in synthetic_dataset.indices])
+            else:
+                all_group_ids.extend(synthetic_dataset.group_ids)
+    elif args.synthetic:
+        all_group_ids.extend(dataset.group_ids)
 
-    print(f"Dataset: {n_total} samples (train={n_train}, val={n_val})")
+    # Train/val split by group (instance-disjoint)
+    n_total = len(dataset)
+    unique_groups = list(set(all_group_ids))
+    rng = np.random.RandomState(42)
+    rng.shuffle(unique_groups)
+    
+    n_val_groups = max(1, int(0.1 * len(unique_groups)))
+    val_groups = set(unique_groups[:n_val_groups])
+    
+    train_indices = []
+    val_indices = []
+    for idx, gid in enumerate(all_group_ids):
+        if gid in val_groups:
+            val_indices.append(idx)
+        else:
+            train_indices.append(idx)
+            
+    train_ds = Subset(dataset, train_indices)
+    val_ds = Subset(dataset, val_indices)
+
+    n_train = len(train_indices)
+    n_val = len(val_indices)
+
+    print(f"Dataset: {n_total} samples (train={n_train}, val={n_val}) from {len(unique_groups)} unique base instances")
 
     # Resolve collate_fn: check the underlying dataset class, not the Subset.
     # Both TrajectoryDataset and SyntheticTrajectoryDataset return identical

@@ -156,9 +156,9 @@ class SyntheticTrajectoryDataset(Dataset):
         self.rng = np.random.RandomState(seed)
 
         # Pre-generate all trajectories
-        self.data = self._generate_all()
+        self.data, self.group_ids = self._generate_all()
 
-    def _generate_all(self) -> List[Dict[str, torch.Tensor]]:
+    def _generate_all(self) -> Tuple[List[Dict[str, torch.Tensor]], List[str]]:
         """Generate all synthetic trajectories.
 
         Uses a diverse mixture of four objective function families to
@@ -172,6 +172,7 @@ class SyntheticTrajectoryDataset(Dataset):
 
         preprocessor = TrajectoryPreprocessor(seed=self.rng.randint(0, 2**31))
         all_items = []
+        all_groups = []
 
         func_types = ["quadratic", "rosenbrock", "ackley", "rastrigin"]
 
@@ -189,18 +190,20 @@ class SyntheticTrajectoryDataset(Dataset):
             objectives = self._compute_objectives(diff, scales, func_type)
             objectives += self.rng.normal(0, 0.01, size=n_trials).astype(np.float32)
 
+            group_id = f"synthetic_{func_type}_{i}"
             pairs = preprocessor.process_trajectory(
                 configs=configs,
                 objectives=objectives,
-                search_space_id=f"synthetic_{func_type}_{i}",
+                search_space_id=group_id,
                 minimize=True,
             )
 
             ds = TrajectoryDataset(pairs, self.max_seq_len, self.hp_dim)
             for j in range(len(ds)):
                 all_items.append(ds[j])
+                all_groups.append(group_id)
 
-        return all_items
+        return all_items, all_groups
 
     @staticmethod
     def _compute_objectives(

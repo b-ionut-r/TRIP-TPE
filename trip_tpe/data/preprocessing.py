@@ -263,10 +263,12 @@ class TrajectoryPreprocessor:
         if max_len <= self.min_prefix_len:
             prefix_lengths = [self.min_prefix_len]
         else:
-            prefix_lengths = self.rng.randint(
-                self.min_prefix_len,
-                max_len + 1,
-                size=self.n_prefixes_per_trajectory,
+            allowed_lengths = np.arange(self.min_prefix_len, max_len + 1)
+            n_samples = min(self.n_prefixes_per_trajectory, len(allowed_lengths))
+            prefix_lengths = self.rng.choice(
+                allowed_lengths,
+                size=n_samples,
+                replace=False,
             )
 
         pairs = []
