@@ -1,0 +1,90 @@
+# TRIP-TPE Default Configuration
+# ================================
+# Aligned with project research specifications:
+#   - ~10M parameter Transformer (4 layers, 256 embed_dim)
+#   - FP16 training for GTX 1650 Ti (4GB VRAM) compatibility
+#   - Gamma = 0.15 (Watanabe 2023 optimal range)
+
+transformer:
+  num_layers: 4
+  embed_dim: 256
+  num_heads: 8
+  ff_dim: 1024
+  dropout: 0.1
+  max_seq_len: 200
+  activation: gelu
+  hp_input_dim: 16
+  obj_input_dim: 1
+  region_output_mode: beta
+  # P1: DETR-style cross-attention dimension queries
+  use_dimension_queries: true
+  dim_query_layers: 2
+  # P2: Mixture-of-Betas components (3 = captures multimodal optima)
+  n_beta_components: 3
+
+training:
+  batch_size: 32
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-2
+  num_epochs: 100
+  warmup_steps: 1000
+  max_grad_norm: 1.0
+  fp16: true
+  curriculum: true
+  curriculum_start_len: 10
+  curriculum_end_len: 100
+  curriculum_warmup_epochs: 20
+  num_workers: 4
+  pin_memory: true
+  save_every: 10
+  eval_every: 5
+  patience: 15
+
+region_proposal:
+  n_warmup_trials: 5
+  requery_interval: 10
+  confidence_level: 0.9
+  min_region_fraction: 0.05
+  max_region_fraction: 0.8
+  trust_factor: 0.8
+  trust_decay: 0.995
+  min_trust_factor: 0.3
+  beta_blend_weight: 0.5
+  # P0: Adaptive trust scheduling with Bayesian regret feedback
+  adaptive_trust: true
+  adaptive_trust_target_coverage: 0.8
+  adaptive_trust_sensitivity: 5.0
+  adaptive_trust_gamma: 0.15
+
+tpe:
+  n_startup_trials: 0
+  n_ei_candidates: 24
+  gamma_strategy: default
+  gamma_value: 0.15
+  multivariate: true
+  group: true
+  constant_liar: false
+
+evaluation:
+  budgets:
+    - 25
+    - 50
+    - 100
+  n_seeds: 20
+  benchmarks:
+    - hpob
+    - yahpo
+  baselines:
+    - random
+    - tpe
+    - gp_ei
+    - smac3
+    - bohb
+    - hebo
+    - pfns4bo
+  metric: normalized_regret
+  output_dir: results
+
+device: auto
+checkpoint_dir: checkpoints
+log_dir: logs

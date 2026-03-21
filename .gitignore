@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Data (too large for git)
+data/
+*.pt
+!configs/*.yaml
+
+# Checkpoints (too large for git)
+checkpoints/
+*.ckpt
+
+# Results (regenerable)
+results/
+
+# Logs
+logs/
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports / generated docs (kept in docs/reports/ or as releases)
+*.docx
+*.pdf
+*.md
+!README.md
+!LICENSE
+!docs/**/*.md
+
+# JS build artifacts
+generate_report.js
+node_modules/
+
+# Misc
+*.egg-info/
+pytest-cache-files-*/
+scripts/

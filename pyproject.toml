@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trip-tpe"
+version = "0.2.0"
+description = "Trajectory-Informed Region Proposal + TPE: A hybrid meta-learning framework synthesizing Transformer-based region proposals with Optuna's TPE for efficient hyperparameter optimization."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Ionuț", email = "ionutionut045@gmail.com"},
+]
+keywords = [
+    "hyperparameter-optimization",
+    "meta-learning",
+    "transformer",
+    "tpe",
+    "optuna",
+    "bayesian-optimization",
+    "automl",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "optuna>=3.4.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "pandas>=2.0.0",
+    "wandb>=0.16.0",
+]
+
+[project.optional-dependencies]
+benchmarks = [
+    "hpob-handler>=0.1.0",
+    "yahpo-gym>=1.0.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+all = ["trip-tpe[benchmarks,dev]"]
+
+[project.scripts]
+trip-tpe-train = "trip_tpe.training.train:main"
+trip-tpe-eval = "trip_tpe.evaluation.benchmark:main"
+trip-tpe-generate = "trip_tpe.data.generate_trajectories:main"
+
+[project.entry-points."optuna.samplers"]
+TRIPTPESampler = "trip_tpe.samplers.trip_tpe_sampler:TRIPTPESampler"
+
+[tool.setuptools.packages.find]
+include = ["trip_tpe*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
