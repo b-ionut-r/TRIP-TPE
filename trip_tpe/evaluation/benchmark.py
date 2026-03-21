@@ -693,14 +693,7 @@ def _create_yahpo_instance(
             for cfg in pre_configs
         ]
 
-        # --- ADD THIS BLOCK ---
-        for cfg in pre_config_dicts:
-            if hasattr(probe, 'config_space') and 'task_id' in probe.config_space:
-                if 'task_id' not in cfg:
-                    cfg['task_id'] = probe.instances[0] if hasattr(probe, 'instances') and len(probe.instances) > 0 else (probe.active_session if hasattr(probe, 'active_session') else str(inst_id))
-            if hasattr(probe, 'config_space') and 'OpenML_task_id' in probe.config_space and 'OpenML_task_id' not in cfg:
-                cfg['OpenML_task_id'] = probe.instances[0] if hasattr(probe, 'instances') and len(probe.instances) > 0 else (probe.active_session if hasattr(probe, 'active_session') else str(inst_id))
-        # ----------------------
+
 
         # YAHPO supports batched objective queries; fall back to per-config
         # evaluation only if a scenario-specific wrapper rejects the batch.
@@ -755,16 +748,7 @@ def _create_yahpo_instance(
             local_cs = b.get_opt_space()
             cfg = _sample_from_trial(trial, local_cs)
 
-            # --- ADD THIS BLOCK ---
-            # YAHPO Gym requires the task_id to be present in the configuration dictionary
-            # for multi-task scenarios when converting it back to a Configuration object.
-            if hasattr(b, 'config_space') and 'task_id' in b.config_space:
-                if 'task_id' not in cfg:
-                    # Inject the active instance ID back into the dictionary
-                    cfg['task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
-            # ----------------------
-            if hasattr(b, 'config_space') and 'OpenML_task_id' in b.config_space and 'OpenML_task_id' not in cfg:
-                cfg['OpenML_task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
+
 
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
@@ -820,6 +804,10 @@ def _configspace_to_optuna(cs: Any) -> Dict[str, Any]:
                     int(hp.lower), int(hp.upper),
                     log=getattr(hp, 'log', False),
                 )
+        elif hasattr(hp, 'sequence'):
+            search_space[hp.name] = optuna.distributions.CategoricalDistribution(
+                list(hp.sequence)
+            )
     return search_space
 
 
@@ -840,6 +828,12 @@ def _sample_from_trial(trial: Any, cs: Any) -> Dict[str, Any]:
                     hp.name, int(hp.lower), int(hp.upper),
                     log=getattr(hp, 'log', False),
                 )
+        elif hasattr(hp, 'sequence'):
+            cfg[hp.name] = trial.suggest_categorical(hp.name, list(hp.sequence))
+        elif hasattr(hp, 'value'):
+            cfg[hp.name] = hp.value
+        elif hasattr(hp, 'default_value') and hp.default_value is not None:
+            cfg[hp.name] = hp.default_value
 
     # Clean inactive hyperparameters using ConfigSpace validation
     if hasattr(cs, "get_conditions") and len(cs.get_conditions()) > 0:
