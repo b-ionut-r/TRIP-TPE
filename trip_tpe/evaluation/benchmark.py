@@ -757,6 +757,33 @@ def _create_yahpo_instance(
             if hasattr(b, 'config_space') and 'OpenML_task_id' in b.config_space and 'OpenML_task_id' not in cfg:
                 cfg['OpenML_task_id'] = b.instances[0] if hasattr(b, 'instances') and len(b.instances) > 0 else (b.active_session if hasattr(b, 'active_session') else str(inst))
 
+            # --- ADD THIS NEW BLOCK ---
+            # 2. Filter out conditionally inactive hyperparameters 
+            if hasattr(b, 'config_space'):
+                import ConfigSpace as CS
+                try:
+                    # Modern ConfigSpace allows instantiating while ignoring inactive values
+                    clean_config = CS.Configuration(b.config_space, values=cfg, allow_inactive_with_values=True)
+                    # Reconstruct the dictionary containing ONLY the active hyperparameters
+                    cfg = dict(clean_config)
+                except TypeError:
+                    # Fallback for older ConfigSpace versions without 'allow_inactive_with_values'
+                    import re
+                    while True:
+                        try:
+                            CS.Configuration(b.config_space, values=cfg)
+                            break # Success, config is clean!
+                        except ValueError as e:
+                            # Match the exact error and drop the offending inactive hyperparameter
+                            match = re.search(r"Inactive hyperparameter '([^']+)' must not be specified", str(e))
+                            if match:
+                                bad_key = match.group(1)
+                                if bad_key in cfg:
+                                    del cfg[bad_key]
+                                    continue
+                            raise e # Reraise if it's a different ValueError
+            # --------------------------
+
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
             result = b.objective_function([cfg])
