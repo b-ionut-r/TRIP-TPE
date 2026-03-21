@@ -687,13 +687,14 @@ def _create_yahpo_instance(
             for cfg in pre_configs
         ]
 
-        # --- FIX: Inject the missing instance identifier ---
-        full_cs_keys = probe.config_space.get_hyperparameter_names()
-        for cfg_dict in pre_config_dicts:
-            for key in ["task_id", "OpenML_task_id", "dataset"]:
-                if key in full_cs_keys and key not in cfg_dict:
-                    cfg_dict[key] = str(inst_id)
-        # ---------------------------------------------------
+        # --- FIX: Inject missing instance identifiers into the probes ---
+        full_hp_names = probe.config_space.get_hyperparameter_names()
+        opt_hp_names = cs.get_hyperparameter_names()
+        missing_keys = set(full_hp_names) - set(opt_hp_names)
+        for cfg in pre_config_dicts:
+            for key in missing_keys:
+                cfg[key] = str(inst_id)
+        # ----------------------------------------------------------------
 
         # YAHPO supports batched objective queries; fall back to per-config
         # evaluation only if a scenario-specific wrapper rejects the batch.
@@ -742,12 +743,12 @@ def _create_yahpo_instance(
             local_cs = b.get_opt_space()
             cfg = _sample_from_trial(trial, local_cs)
 
-            # --- FIX: Inject the missing instance identifier ---
-            full_cs_keys = b.config_space.get_hyperparameter_names()
-            for key in ["task_id", "OpenML_task_id", "dataset"]:
-                if key in full_cs_keys and key not in cfg:
-                    cfg[key] = str(inst)
-            # ---------------------------------------------------
+            # --- FIX: Dynamically inject missing instance identifiers ---
+            full_hp_names = b.config_space.get_hyperparameter_names()
+            opt_hp_names = local_cs.get_hyperparameter_names()
+            for key in set(full_hp_names) - set(opt_hp_names):
+                cfg[key] = str(inst)
+            # ------------------------------------------------------------
 
             # Single-config calls are valid; the batched API is used only where
             # it materially reduces overhead.
