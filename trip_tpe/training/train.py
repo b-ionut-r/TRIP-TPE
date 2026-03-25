@@ -98,12 +98,14 @@ class Trainer:
         mem = self.model.memory_estimate_mb(self.tc.batch_size)
         print(f"Estimated VRAM: {mem['estimated_total_mb']:.0f} MB")
 
-        # Loss function
+        # Loss function — weights from config (v2: rebalanced for guided mode)
+        lc = getattr(config, 'loss', None)
         self.criterion = RegionProposalLoss(
-            lambda_bound=1.0,
-            lambda_cover=2.0,
-            lambda_tight=0.3,
-            lambda_kl=0.01,
+            lambda_bound=getattr(lc, 'lambda_bound', 1.0) if lc else 1.0,
+            lambda_cover=getattr(lc, 'lambda_cover', 1.0) if lc else 1.0,
+            lambda_tight=getattr(lc, 'lambda_tight', 0.8) if lc else 0.8,
+            lambda_kl=getattr(lc, 'lambda_kl', 0.02) if lc else 0.02,
+            lambda_mode=getattr(lc, 'lambda_mode', 0.5) if lc else 0.5,
         )
 
         # Optimizer

@@ -89,36 +89,53 @@ class TrainingConfig:
 
 
 @dataclass
+class LossConfig:
+    """Configuration for training loss weights.
+
+    Rebalanced for guided sampling mode (v2):
+      - Coverage reduced (2.0→1.0): sampling, not bounding.
+      - Tightness increased (0.3→0.8): tighter = more focused samples.
+      - Mode accuracy (NEW, 0.5): ensures Beta peak matches optimum.
+      - KL slightly increased (0.01→0.02): prevents overconfidence.
+    """
+    lambda_bound: float = 1.0
+    lambda_cover: float = 1.0
+    lambda_tight: float = 0.8
+    lambda_kl: float = 0.02
+    lambda_mode: float = 0.5
+
+
+@dataclass
 class RegionProposalConfig:
     """Configuration for region proposal behavior at inference time."""
-    # Number of initial random trials before querying the Transformer
+    # --- Mode selection ---
+    # "guided" (recommended): Transformer samples seed trials, TPE on full space.
+    # "constrained" (legacy): Transformer restricts TPE's search space.
+    mode: str = "guided"
+
+    # --- Guided mode parameters (strong Transformer involvement) ---
+    n_guided_exploration: float = 0.3   # 30% of budget (float=fraction, int=absolute)
+    inject_rate: float = 0.4            # Post-warmup injection fraction
+    inject_decay: float = 0.99          # Decay per trial
+    min_inject_rate: float = 0.10       # Floor for injection rate
+    exploration_temperature: float = 0.15  # Sharper (0=exact, 1=uniform)
+    # Burst re-centering: periodic consecutive Transformer samples
+    burst_requery_interval: int = 20    # Every N TPE trials, fire a burst
+    burst_size: int = 2                 # Consecutive Transformer samples per burst
+
+    # --- Legacy constrained mode parameters ---
     n_warmup_trials: int = 5
-    # How often to re-query the Transformer (in trial steps)
     requery_interval: int = 10
-    # Confidence threshold for region bounds (controls tightness)
     confidence_level: float = 0.9
-    # Minimum region width as fraction of full search space per dimension
     min_region_fraction: float = 0.05
-    # Maximum region width — prevents overly broad proposals
     max_region_fraction: float = 0.8
-    # Blending factor: how much to trust Transformer vs. full space
-    # 1.0 = fully trust Transformer bounds, 0.0 = ignore Transformer
     trust_factor: float = 0.8
-    # Decay the trust factor over time to allow TPE more freedom
     trust_decay: float = 0.995
     min_trust_factor: float = 0.3
-    # Weight for Beta quantile bounds in the ensemble prediction
-    # 1.0 = only Beta quantiles, 0.0 = only direct bounds, 0.5 = equal blend
     beta_blend_weight: float = 0.5
-    # --- P0: Adaptive trust scheduling with Bayesian regret feedback ---
-    # When True, trust_decay is modulated by how well the Transformer's
-    # proposals actually cover the top-performing trials.
     adaptive_trust: bool = True
-    # Target coverage rate (fraction of top-gamma trials inside proposed region)
     adaptive_trust_target_coverage: float = 0.8
-    # Sensitivity of trust adjustment to coverage deviation
     adaptive_trust_sensitivity: float = 5.0
-    # Gamma quantile for defining "good" trials in adaptive trust
     adaptive_trust_gamma: float = 0.15
 
 
@@ -157,6 +174,7 @@ class TRIPTPEConfig:
     """Top-level configuration aggregating all sub-configs."""
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    loss: LossConfig = field(default_factory=LossConfig)
     region_proposal: RegionProposalConfig = field(default_factory=RegionProposalConfig)
     tpe: TPEConfig = field(default_factory=TPEConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)

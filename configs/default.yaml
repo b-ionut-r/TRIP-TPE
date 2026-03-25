@@ -4,6 +4,10 @@
 #   - ~10M parameter Transformer (4 layers, 256 embed_dim)
 #   - FP16 training for GTX 1650 Ti (4GB VRAM) compatibility
 #   - Gamma = 0.15 (Watanabe 2023 optimal range)
+#
+# v2: Guided sampling mode (no hard space constraints).
+#     Loss rebalanced: stronger tightness + mode accuracy loss for
+#     focused Beta distributions suitable for direct sampling.
 
 transformer:
   num_layers: 4
@@ -40,7 +44,40 @@ training:
   eval_every: 5
   patience: 15
 
+loss:
+  # Rebalanced for guided sampling mode (v2):
+  #   - Coverage reduced from 2.0→1.0: we're sampling, not bounding, so
+  #     moderate coverage is sufficient (wrong bounds don't matter as much).
+  #   - Tightness increased from 0.3→0.8: tighter Beta distributions produce
+  #     more focused samples, directly improving guided exploration.
+  #   - Mode accuracy (NEW, 0.5): penalizes when the Beta distribution's peak
+  #     is far from the target region center. This is the single most impactful
+  #     term for guided mode — it ensures samples cluster near the optimum.
+  #   - KL slightly increased (0.01→0.02): prevents overconfident predictions
+  #     that would collapse sampling diversity.
+  lambda_bound: 1.0
+  lambda_cover: 1.0
+  lambda_tight: 0.8
+  lambda_kl: 0.02
+  lambda_mode: 0.5
+
 region_proposal:
+  # Mode: "guided" (recommended) or "constrained" (legacy).
+  #   guided: Transformer samples seed trials, TPE runs on FULL space.
+  #   constrained: Transformer restricts TPE's search space (legacy, risky).
+  mode: guided
+
+  # Guided mode parameters (strong Transformer involvement):
+  n_guided_exploration: 0.3     # 30% of budget (float=fraction, int=absolute)
+  inject_rate: 0.4              # Post-warmup injection rate
+  inject_decay: 0.99            # Decay per trial
+  min_inject_rate: 0.10         # Floor for injection rate
+  exploration_temperature: 0.15 # Sharper model confidence (0=exact, 1=uniform)
+  # Burst re-centering: periodic consecutive Transformer samples
+  burst_requery_interval: 20    # Every N TPE trials, fire a burst
+  burst_size: 2                 # Consecutive Transformer samples per burst
+
+  # Legacy constrained mode parameters (only used if mode=constrained):
   n_warmup_trials: 5
   requery_interval: 10
   confidence_level: 0.9
@@ -50,7 +87,6 @@ region_proposal:
   trust_decay: 0.995
   min_trust_factor: 0.3
   beta_blend_weight: 0.5
-  # P0: Adaptive trust scheduling with Bayesian regret feedback
   adaptive_trust: true
   adaptive_trust_target_coverage: 0.8
   adaptive_trust_sensitivity: 5.0
@@ -87,13 +123,11 @@ evaluation:
   output_dir: results
 
 data_generation:
-  # Default mode: 'real' combines HPO-B + YAHPO for maximum coverage
   mode: real
   n_prefixes_per_trajectory: 15
   hpob_augments: 10
   yahpo_augments: 5
   yahpo_samples_per_instance: 500
-  # Training data mixing: real is primary, synthetic is minor augmentation
   mix_synthetic: 0.1
 
 device: auto

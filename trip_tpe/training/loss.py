@@ -6,10 +6,17 @@ Multi-objective loss combining:
     2. Coverage Loss: Penalizes proposals that fail to contain the true optimum
     3. Tightness Loss: Rewards proposals that are as narrow as possible
     4. Beta KL Divergence: Regularizes the Beta distribution parameters
+    5. Mode Accuracy Loss: Penalizes when the Beta distribution's mode is far
+       from the target region center (NEW — critical for guided sampling mode)
 
 The balance between coverage and tightness creates the core tension:
 the model must learn to propose regions that are tight enough to help TPE
 but broad enough to contain the global optimum.
+
+For the guided sampling mode (recommended), the mode accuracy loss is the
+most important term: it ensures the Beta distribution's peak is centered on
+the actual promising region, so that samples drawn from the distribution
+tend to land near the optimum.
 """
 
 from __future__ import annotations
@@ -24,21 +31,24 @@ import torch.nn.functional as F
 class RegionProposalLoss(nn.Module):
     """Combined loss for region proposal training.
 
-    Loss = λ_bound * L_bound + λ_cover * L_cover + λ_tight * L_tight + λ_kl * L_kl
+    Loss = λ_bound * L_bound + λ_cover * L_cover + λ_tight * L_tight
+         + λ_kl * L_kl + λ_mode * L_mode
 
     Where:
         L_bound: Smooth L1 loss between predicted and target bounds
         L_cover: Penalty for predicted regions that don't contain target bounds
         L_tight: Encourages tight (narrow) proposals
         L_kl: KL divergence regularization on Beta parameters
+        L_mode: MSE between Beta distribution mode and target region center
     """
 
     def __init__(
         self,
         lambda_bound: float = 1.0,
-        lambda_cover: float = 2.0,
-        lambda_tight: float = 0.3,
-        lambda_kl: float = 0.01,
+        lambda_cover: float = 1.0,
+        lambda_tight: float = 0.8,
+        lambda_kl: float = 0.02,
+        lambda_mode: float = 0.5,
     ):
         """Initialize the loss function.
 
@@ -47,12 +57,16 @@ class RegionProposalLoss(nn.Module):
             lambda_cover: Weight for coverage loss (higher = more conservative).
             lambda_tight: Weight for tightness reward (higher = tighter bounds).
             lambda_kl: Weight for Beta KL divergence regularization.
+            lambda_mode: Weight for mode accuracy loss (higher = more focused
+                         Beta peaks). Critical for guided sampling mode.
+                         Set to 0.0 for legacy constrained-mode training.
         """
         super().__init__()
         self.lambda_bound = lambda_bound
         self.lambda_cover = lambda_cover
         self.lambda_tight = lambda_tight
         self.lambda_kl = lambda_kl
+        self.lambda_mode = lambda_mode
 
     def forward(
         self,
@@ -84,11 +98,8 @@ class RegionProposalLoss(nn.Module):
         is_mixture = alpha.dim() == 3 and alpha.shape[-1] > 1
 
         if is_mixture and mix_weights is not None:
-            # P2: Collapse mixture to expected bounds using mixing weights
-            # pred_lower/upper: (B, hp_dim, K), mix_weights: (B, hp_dim, K)
             pred_lower = (predictions["pred_lower"] * mix_weights).sum(dim=-1)
             pred_upper = (predictions["pred_upper"] * mix_weights).sum(dim=-1)
-            # For KL: weighted average across components
             alpha_flat = (alpha * mix_weights).sum(dim=-1)
             beta_flat = (beta_param * mix_weights).sum(dim=-1)
         else:
@@ -124,12 +135,42 @@ class RegionProposalLoss(nn.Module):
         kl_loss = (kl * dim_mask).sum(dim=1) / n_active.squeeze(1)
         kl_loss = kl_loss.mean()
 
+        # 5. Mode accuracy loss: penalize Beta mode far from target center
+        #    Beta mode = (α - 1) / (α + β - 2) when α, β > 1
+        #    This is the single most important loss for guided sampling mode:
+        #    it ensures that samples drawn from the Beta distribution land
+        #    near the center of the actual promising region.
+        mode_loss = torch.tensor(0.0, device=alpha_flat.device)
+        if self.lambda_mode > 0:
+            target_center = (target_lower + target_upper) / 2.0
+
+            # Compute Beta mode, guarding against α,β ≤ 1 (where mode is
+            # at the boundary, not interior). For α,β > 1 the mode formula
+            # is well-defined. For other cases, use the mean α/(α+β) as a
+            # smooth fallback.
+            sum_ab = alpha_flat + beta_flat
+            mode_denom = (sum_ab - 2.0).clamp(min=0.1)
+            beta_mode_raw = (alpha_flat - 1.0).clamp(min=0.0) / mode_denom
+            beta_mode_raw = beta_mode_raw.clamp(0.0, 1.0)
+
+            # Fallback: use mean for dimensions where α or β ≤ 1
+            beta_mean = alpha_flat / sum_ab.clamp(min=0.01)
+            use_mode = ((alpha_flat > 1.0) & (beta_flat > 1.0)).float()
+            beta_center = use_mode * beta_mode_raw + (1.0 - use_mode) * beta_mean
+
+            mode_err = F.mse_loss(
+                beta_center * dim_mask, target_center * dim_mask, reduction="none"
+            )
+            mode_loss = (mode_err * dim_mask).sum(dim=1) / n_active.squeeze(1)
+            mode_loss = mode_loss.mean()
+
         # Combined loss
         total_loss = (
             self.lambda_bound * bound_loss
             + self.lambda_cover * coverage_loss
             + self.lambda_tight * tightness_loss
             + self.lambda_kl * kl_loss
+            + self.lambda_mode * mode_loss
         )
 
         return {
@@ -138,6 +179,7 @@ class RegionProposalLoss(nn.Module):
             "coverage_loss": coverage_loss.detach(),
             "tightness_loss": tightness_loss.detach(),
             "kl_loss": kl_loss.detach(),
+            "mode_loss": mode_loss.detach(),
         }
 
 
@@ -158,7 +200,7 @@ def _beta_kl_divergence(
     Returns:
         KL divergence per element, same shape as inputs.
     """
-    # FIX: Force float32. lgamma and digamma are highly unstable in FP16 
+    # FIX: Force float32. lgamma and digamma are highly unstable in FP16
     # and will overflow to Infinity, causing the NaN losses.
     alpha_q, beta_q = alpha_q.float(), beta_q.float()
     alpha_p, beta_p = alpha_p.float(), beta_p.float()

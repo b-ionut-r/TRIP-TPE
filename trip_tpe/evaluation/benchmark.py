@@ -869,13 +869,23 @@ def _sample_from_trial(trial: Any, cs: Any) -> Dict[str, Any]:
 # Benchmark execution engine
 # ============================================================================
 
-def _create_sampler(method: str, seed: int, model_path: Optional[str] = None) -> Any:
+def _create_sampler(
+    method: str, seed: int, model_path: Optional[str] = None, n_trials: int = 100
+) -> Any:
     """Create an Optuna sampler for a given method."""
     if method == "trip_tpe":
         from trip_tpe.samplers.trip_tpe_sampler import TRIPTPESampler
         return TRIPTPESampler(
             model_path=model_path, seed=seed,
-            n_warmup_trials=5, requery_interval=10,
+            mode="guided",
+            n_guided_exploration=0.3,       # 30% of budget = Transformer-guided seeds
+            inject_rate=0.4,
+            inject_decay=0.99,
+            min_inject_rate=0.10,
+            exploration_temperature=0.15,
+            burst_requery_interval=20,
+            burst_size=2,
+            n_trials_hint=n_trials,
         )
     elif method == "tpe":
         return optuna.samplers.TPESampler(seed=seed, multivariate=True)
@@ -904,7 +914,7 @@ def run_single_benchmark(
         instance.objective.reset()
 
     direction = "minimize" if instance.minimize else "maximize"
-    sampler = _create_sampler(method, seed, model_path)
+    sampler = _create_sampler(method, seed, model_path, n_trials=n_trials)
     study = optuna.create_study(direction=direction, sampler=sampler)
 
     t0 = time.time()
