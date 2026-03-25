@@ -131,7 +131,7 @@ class Trainer:
         if self.use_wandb:
             try:
                 wandb_kwargs = {
-                    "project": getattr(config, 'wandb_project', 'trip-tpe'),
+                    "project": getattr(config, 'wandb_project', 'trip-tpe-fixed'),
                     "name": getattr(config, 'wandb_run_name', None),
                     "config": _dataclass_to_dict(config),
                     "tags": ["training", f"layers-{self.mc.num_layers}", f"embed-{self.mc.embed_dim}"],

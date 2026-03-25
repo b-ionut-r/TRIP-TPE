@@ -183,7 +183,7 @@ class TRIPTPEConfig:
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
     # Weights & Biases
-    wandb_project: str = "trip-tpe"
+    wandb_project: str = "trip-tpe-fixed"
     wandb_entity: Optional[str] = None  # None = default user account
     wandb_run_name: Optional[str] = None  # None = auto-generated
 

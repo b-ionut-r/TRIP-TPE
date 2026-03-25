@@ -1004,7 +1004,7 @@ def main():
         default=500,
         help="Random config samples per YAHPO instance (default 500)",
     )
-    parser.add_argument("--wandb-project", type=str, default="trip-tpe", help="W&B project")
+    parser.add_argument("--wandb-project", type=str, default="trip-tpe-fixed", help="W&B project")
     parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
 

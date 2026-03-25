@@ -1375,7 +1375,7 @@ def main():
         "--training-manifest", type=str, default=None,
         help="Path to training_manifest.json for data leakage prevention",
     )
-    parser.add_argument("--wandb-project", type=str, default="trip-tpe", help="W&B project")
+    parser.add_argument("--wandb-project", type=str, default="trip-tpe-fixed", help="W&B project")
     parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B")
 
