@@ -30,7 +30,7 @@ Data leakage prevention:
       reads to enforce the split.
 
 Evaluation protocol (NeurIPS/ICML standard):
-    - Normalized regret at fixed budgets (25, 50, 100 trials)
+    - Normalized regret at fixed budgets (5, 10, 20, 25, 50, 100 trials)
     - Convergence curves with 95% confidence intervals
     - Average rank with critical difference diagrams
     - Wilcoxon signed-rank tests for statistical significance
@@ -76,6 +76,8 @@ from trip_tpe.utils.metrics import (
     normalized_regret_at_budget,
     wilcoxon_signed_rank_test,
 )
+
+REPORT_BUDGETS = (5, 10, 20, 25, 50, 100)
 
 
 # ============================================================================
@@ -736,17 +738,22 @@ def _create_yahpo_instance(
     search_space = _configspace_to_optuna(cs)
     n_dims = len(search_space)
 
-    # Objective closure — each call creates a fresh BenchmarkSet to avoid
-    # shared state between seeds
+    # Objective closure — lazily initialize one BenchmarkSet and reuse it.
+    # The YAHPO surrogate is effectively read-only after set_instance(), so
+    # rebuilding it on every trial is unnecessary overhead.
     def make_objective(scen, inst, metric, cs_template):
+        bench_cache: Dict[str, Any] = {"bench": None}
+
         def objective(trial):
-            with redirect_stdout(io.StringIO()):
-                from yahpo_gym import BenchmarkSet
-                b = BenchmarkSet(scen)
-                b.set_instance(str(inst))
-                
-            local_cs = b.get_opt_space()
-            cfg = _sample_from_trial(trial, local_cs)
+            b = bench_cache["bench"]
+            if b is None:
+                with redirect_stdout(io.StringIO()):
+                    from yahpo_gym import BenchmarkSet
+                    b = BenchmarkSet(scen)
+                    b.set_instance(str(inst))
+                bench_cache["bench"] = b
+
+            cfg = _sample_from_trial(trial, cs_template)
 
 
 
@@ -764,6 +771,12 @@ def _create_yahpo_instance(
             if val is None or np.isnan(val):
                 return float("inf") if minimize else float("-inf")
             return float(val)
+
+        def reset() -> None:
+            """Reset cached YAHPO state before each benchmark run."""
+            bench_cache["bench"] = None
+
+        objective.reset = reset  # type: ignore[attr-defined]
         return objective
 
     return BenchmarkInstance(
@@ -873,10 +886,10 @@ def _create_sampler(
     method: str, seed: int, model_path: Optional[str] = None, n_trials: int = 100
 ) -> Any:
     """Create an Optuna sampler for a given method."""
-    if method == "trip_tpe":
+    if method in {"trip_tpe", "trip_tpe_nomodel"}:
         from trip_tpe.samplers.trip_tpe_sampler import TRIPTPESampler
         return TRIPTPESampler(
-            model_path=model_path, seed=seed,
+            model_path=model_path if method == "trip_tpe" else None, seed=seed,
             mode="guided",
             n_guided_exploration=0.3,       # 30% of budget = Transformer-guided seeds
             inject_rate=0.4,
@@ -897,6 +910,49 @@ def _create_sampler(
         return optuna.samplers.TPESampler(seed=seed)
 
 
+def _aggregate_by_instance(
+    method_results: List[BenchmarkResult],
+    value_fn: Callable[[BenchmarkResult], float],
+) -> Dict[str, float]:
+    """Aggregate seed-level results to one value per benchmark instance."""
+    grouped: Dict[str, List[float]] = {}
+    for result in method_results:
+        value = value_fn(result)
+        if np.isnan(value):
+            continue
+        grouped.setdefault(result.instance, []).append(value)
+    return {
+        instance: float(np.nanmean(values))
+        for instance, values in grouped.items()
+        if values
+    }
+
+
+def _aligned_instance_values(
+    results: Dict[str, List[BenchmarkResult]],
+    methods: List[str],
+    value_fn: Callable[[BenchmarkResult], float],
+) -> Dict[str, List[float]]:
+    """Return per-method metrics aligned on the shared instance set."""
+    aggregated = {
+        method: _aggregate_by_instance(results[method], value_fn)
+        for method in methods
+        if method in results
+    }
+    if not aggregated:
+        return {}
+
+    common_instances = set.intersection(*(set(values.keys()) for values in aggregated.values()))
+    if not common_instances:
+        return {}
+
+    ordered_instances = sorted(common_instances)
+    return {
+        method: [aggregated[method][instance] for instance in ordered_instances]
+        for method in aggregated
+    }
+
+
 def run_single_benchmark(
     method: str,
     instance: BenchmarkInstance,
@@ -906,12 +962,11 @@ def run_single_benchmark(
 ) -> BenchmarkResult:
     """Run a single optimization benchmark.
 
-    For tabular benchmarks (HPO-B), resets the objective's consumed-entries
-    set before each run so every seed starts fresh.
+    Resets any objective-local state before each run so every seed starts fresh.
     """
-    # Reset tabular state if applicable
-    if isinstance(instance.objective, _TabularObjective):
-        instance.objective.reset()
+    reset_hook = getattr(instance.objective, "reset", None)
+    if callable(reset_hook):
+        reset_hook()
 
     direction = "minimize" if instance.minimize else "maximize"
     sampler = _create_sampler(method, seed, model_path, n_trials=n_trials)
@@ -924,7 +979,7 @@ def run_single_benchmark(
     trajectory = np.array([t.value for t in study.trials if t.value is not None])
 
     regret_at_budgets = {}
-    for budget in[25, 50, 100]:
+    for budget in REPORT_BUDGETS:
         if budget <= len(trajectory):
             regret_at_budgets[budget] = normalized_regret_at_budget(
                 trajectory, instance.y_min, instance.y_max, budget,
@@ -1008,7 +1063,7 @@ def _print_summary(suite_name: str, methods: List[str], results: Dict[str, List[
     print(f"SUMMARY: {suite_name}")
     print("=" * 60)
 
-    for budget in[25, 50, 100]:
+    for budget in REPORT_BUDGETS:
         print(f"\n--- Normalized Regret @ Budget={budget} ---")
         regret_by_method = {}
         for method in methods:
@@ -1018,26 +1073,32 @@ def _print_summary(suite_name: str, methods: List[str], results: Dict[str, List[
                 regret_by_method[method] = regrets
                 print(f"  {method:15s}: {np.nanmean(regrets):.4f} +/- {np.nanstd(regrets):.4f}")
 
-        if len(regret_by_method) > 1:
-            min_len = min(len(v) for v in regret_by_method.values())
-            truncated = {k: v[:min_len] for k, v in regret_by_method.items()}
-            ranks = average_rank(truncated)
+        ranked_methods = [m for m in methods if m in regret_by_method]
+        aligned = _aligned_instance_values(
+            results,
+            ranked_methods,
+            lambda r, budget=budget: r.regret_at_budgets.get(budget, float("nan")),
+        )
+        if len(aligned) > 1:
+            ranks = average_rank(aligned)
             print(f"\n  Average Rank:")
             for method, rank in sorted(ranks.items(), key=lambda x: x[1]):
                 print(f"    {method:15s}: {rank:.2f}")
 
     if "trip_tpe" in methods and len(methods) > 1:
-        print(f"\n--- Wilcoxon Signed-Rank Tests (TRIP-TPE vs baselines) ---")
-        trip_aurcs = [r.aurc for r in results["trip_tpe"]]
+        print(f"\n--- Wilcoxon Signed-Rank Tests (TRIP-TPE vs baselines, instance-mean over seeds) ---")
         for method in methods:
             if method == "trip_tpe":
                 continue
-            base_aurcs = [r.aurc for r in results[method]]
-            n = min(len(trip_aurcs), len(base_aurcs))
-            if n >= 5:
-                _, pval = wilcoxon_signed_rank_test(trip_aurcs[:n], base_aurcs[:n])
+            aligned = _aligned_instance_values(results, ["trip_tpe", method], lambda r: r.aurc)
+            if len(aligned) < 2:
+                continue
+            trip_aurcs = aligned["trip_tpe"]
+            base_aurcs = aligned[method]
+            if len(trip_aurcs) >= 5:
+                _, pval = wilcoxon_signed_rank_test(trip_aurcs, base_aurcs)
                 sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else ""
-                print(f"  TRIP-TPE vs {method:15s}: p={pval:.4f} {sig}")
+                print(f"  TRIP-TPE vs {method:15s}: p={pval:.4f} {sig} (n={len(trip_aurcs)} instances)")
 
 
 def _save_results(
@@ -1063,7 +1124,7 @@ def _save_results(
                     r.regret_at_budgets.get(b, float("nan"))
                     for r in method_results
                 ]))
-                for b in [25, 50, 100]
+                for b in REPORT_BUDGETS
             },
         }
 
@@ -1122,12 +1183,16 @@ def _log_wandb_suite_summary(
     # --- Summary comparison table ---
     table = wandb.Table(
         columns=["suite", "method", "mean_aurc", "std_aurc", "mean_best",
-                 "mean_wall_time", "regret@25", "regret@50", "regret@100", "n_runs"]
+                 "mean_wall_time", "regret@5", "regret@10", "regret@20",
+                 "regret@25", "regret@50", "regret@100", "n_runs"]
     )
     for method in methods:
         aurcs = [r.aurc for r in results[method]]
         bests = [r.best_value for r in results[method]]
         times =[r.wall_time for r in results[method]]
+        r5 =[r.regret_at_budgets.get(5, float("nan")) for r in results[method]]
+        r10 =[r.regret_at_budgets.get(10, float("nan")) for r in results[method]]
+        r20 =[r.regret_at_budgets.get(20, float("nan")) for r in results[method]]
         r25 =[r.regret_at_budgets.get(25, float("nan")) for r in results[method]]
         r50 =[r.regret_at_budgets.get(50, float("nan")) for r in results[method]]
         r100 =[r.regret_at_budgets.get(100, float("nan")) for r in results[method]]
@@ -1135,6 +1200,7 @@ def _log_wandb_suite_summary(
             suite.name, method,
             float(np.mean(aurcs)), float(np.std(aurcs)),
             float(np.mean(bests)), float(np.mean(times)),
+            float(np.nanmean(r5)), float(np.nanmean(r10)), float(np.nanmean(r20)),
             float(np.nanmean(r25)), float(np.nanmean(r50)), float(np.nanmean(r100)),
             len(aurcs),
         )
@@ -1164,7 +1230,7 @@ def _log_wandb_suite_summary(
         })
 
     # --- Regret bar charts per budget ---
-    for budget in [25, 50, 100]:
+    for budget in REPORT_BUDGETS:
         bar_data =[]
         for method in methods:
             regrets =[r.regret_at_budgets.get(budget, float("nan"))
@@ -1380,6 +1446,14 @@ def main():
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B")
 
     args = parser.parse_args()
+
+    if (
+        args.model_path is None
+        and "trip_tpe" in args.methods
+        and "trip_tpe_nomodel" in args.methods
+    ):
+        args.methods = [m for m in args.methods if m != "trip_tpe_nomodel"]
+        print("WARNING: Dropping 'trip_tpe_nomodel' because --model-path was not provided.")
 
     use_wandb = WANDB_AVAILABLE and not args.no_wandb
     if use_wandb:
